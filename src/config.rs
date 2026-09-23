@@ -36,11 +36,14 @@ fn load_fragment(path: &Path, root: &Path, visited: &mut BTreeSet<PathBuf>) -> R
     }
     let source =
         std::fs::read_to_string(&path).map_err(|e| format!("Cannot read manifest: {e}"))?;
-    // Parser errors can include the input line, so keep them out of diagnostics.
-    let mut manifest: Manifest = toml::from_str(&source).map_err(|_| {
+    let deserializer = toml::Deserializer::parse(&source)
+        .map_err(|error| format!("Invalid TOML in {}: {error}", path.display()))?;
+    let mut manifest: Manifest = serde_path_to_error::deserialize(deserializer).map_err(|error| {
+        let location = error.path().to_string();
         format!(
-            "Invalid TOML or unknown manifest field in {}",
-            path.display()
+            "Invalid manifest in {} at {}",
+            path.display(),
+            location
         )
     })?;
     if manifest.schema_version != 1 {

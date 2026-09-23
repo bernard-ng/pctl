@@ -63,6 +63,29 @@ type = "string"
 }
 
 #[test]
+fn reports_toml_field_paths_for_invalid_values() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("pctl.toml");
+    std::fs::write(
+        &path,
+        r#"
+        schema_version = 1
+        [tasks.api]
+        description = "API"
+        command = ["echo"]
+        [tasks.api.parameters.filter]
+        type = 1
+        "#,
+    )
+    .unwrap();
+    let error = match Project::load(&path) {
+        Ok(_) => panic!("invalid manifest should fail"),
+        Err(error) => error,
+    };
+    assert!(error.contains("tasks.api.parameters.filter.type"));
+}
+
+#[test]
 fn rejects_cycles_duplicates_unknown_fields_and_browser_secrets() {
     for source in [
         TASKS.replace("command = [\"example\", \"prepare\"]", "depends_on = [\"all\"]"),
