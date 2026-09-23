@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add GitHub Actions quality checks and tag-driven Linux release artifacts for `pctl`.
 - Add a Rust library and CLI for declarative repository operations.
 - Load modular TOML manifests with strict schema validation and duplicate detection.
 - Plan dependencies deterministically with profile restrictions and typed parameters.
