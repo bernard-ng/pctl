@@ -1,0 +1,17 @@
+schema_version = 1
+
+[tasks.format]
+description = "Check Rust formatting"
+command = ["cargo", "fmt", "--check"]
+
+[tasks.lint]
+description = "Check Rust lint diagnostics"
+command = ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"]
+
+[tasks.test]
+description = "Run pctl tests"
+command = ["cargo", "test", "--locked"]
+
+[tasks.check]
+description = "Run the complete pctl development gate"
+depends_on = ["format", "lint", "test"]
