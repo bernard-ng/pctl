@@ -12,7 +12,9 @@ pub fn build(
     let mut plan = Plan {
         profile: profile.into(),
         tasks: Vec::new(),
+        tools: manifest.tools.clone(),
     };
+
     visit(
         manifest,
         target,
@@ -95,12 +97,31 @@ fn visit(
             }
         })
         .collect::<Result<Vec<_>>>()?;
+    let mut environment = manifest
+        .profiles
+        .get(profile)
+        .map(|p| p.environment.clone())
+        .unwrap_or_default();
+    environment.extend(task.environment.clone());
+    let mut exclusive = task.exclusive.clone();
+    if let Some(compose) = &task.compose {
+        exclusive.push(format!("compose:{}", compose.project));
+    }
     plan.tasks.push(PlannedTask {
         id: id.into(),
         command,
         working_directory: task.working_directory.clone(),
-        environment: task.environment.clone(),
+        environment,
         destructive: task.destructive,
+        depends_on: task.depends_on.clone(),
+        cleanup: task.cleanup.clone(),
+        timeout_seconds: task.timeout_seconds,
+        exclusive,
+        requires: task.requires.clone(),
+        consumers: task.consumers.clone(),
+        pass_environment: task.pass_environment.clone(),
+        compose: task.compose.clone(),
+        cache: task.cache.clone(),
     });
     active.remove(id);
     done.insert(id.into());

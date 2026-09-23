@@ -113,13 +113,14 @@ required_in = ["production"]
 
 #[derive(Default)]
 struct RecordingExecutor {
-    calls: Vec<Vec<String>>,
+    calls: std::sync::Mutex<Vec<Vec<String>>>,
     fail_at: Option<usize>,
 }
 impl ProcessExecutor for RecordingExecutor {
-    fn execute(&mut self, request: ProcessRequest<'_>) -> pctl::Result<i32> {
-        self.calls.push(request.command.to_vec());
-        Ok(if self.fail_at == Some(self.calls.len()) {
+    fn execute(&self, request: ProcessRequest<'_>) -> pctl::Result<i32> {
+        let mut calls = self.calls.lock().unwrap();
+        calls.push(request.command.to_vec());
+        Ok(if self.fail_at == Some(calls.len()) {
             42
         } else {
             0
@@ -131,14 +132,14 @@ impl ProcessExecutor for RecordingExecutor {
 fn stops_on_failure_and_preserves_exit_code() {
     let (_directory, project) = project(TASKS);
     let plan = planning::build(&project.manifest, "all", "local", &BTreeMap::new()).unwrap();
-    let mut executor = RecordingExecutor {
+    let executor = RecordingExecutor {
         fail_at: Some(2),
         ..Default::default()
     };
-    let report = execution::execute(&plan, &project.root, false, &mut executor).unwrap();
+    let report = execution::execute(&plan, &project.root, false, &executor).unwrap();
     assert_eq!(report.exit_code, 42);
     assert_eq!(report.completed, ["prepare"]);
-    assert_eq!(executor.calls.len(), 2);
+    assert_eq!(executor.calls.lock().unwrap().len(), 2);
 }
 
 #[test]
@@ -146,10 +147,10 @@ fn preflights_entire_plan_before_any_side_effect() {
     let (_directory, project) = project(TASKS);
     let mut plan = planning::build(&project.manifest, "all", "local", &BTreeMap::new()).unwrap();
     plan.tasks.last_mut().unwrap().destructive = true;
-    let mut executor = RecordingExecutor::default();
-    assert!(execution::execute(&plan, &project.root, false, &mut executor).is_err());
-    assert!(executor.calls.is_empty());
+    let executor = RecordingExecutor::default();
+    assert!(execution::execute(&plan, &project.root, false, &executor).is_err());
+    assert!(executor.calls.lock().unwrap().is_empty());
     plan.tasks.last_mut().unwrap().working_directory = "..".into();
-    assert!(execution::execute(&plan, &project.root, true, &mut executor).is_err());
-    assert!(executor.calls.is_empty());
+    assert!(execution::execute(&plan, &project.root, true, &executor).is_err());
+    assert!(executor.calls.lock().unwrap().is_empty());
 }

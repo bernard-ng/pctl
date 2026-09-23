@@ -11,6 +11,10 @@ pub struct Manifest {
     pub tasks: BTreeMap<String, Task>,
     #[serde(default)]
     pub variables: BTreeMap<String, Variable>,
+    #[serde(default)]
+    pub profiles: BTreeMap<String, Profile>,
+    #[serde(default)]
+    pub tools: BTreeMap<String, Tool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -31,6 +35,50 @@ pub struct Task {
     pub environment: BTreeMap<String, String>,
     #[serde(default)]
     pub destructive: bool,
+    #[serde(default)]
+    pub cleanup: Vec<Vec<String>>,
+    pub timeout_seconds: Option<u64>,
+    #[serde(default)]
+    pub exclusive: Vec<String>,
+    #[serde(default)]
+    pub requires: Vec<String>,
+    #[serde(default)]
+    pub consumers: Vec<String>,
+    #[serde(default)]
+    pub pass_environment: Vec<String>,
+    pub compose: Option<Compose>,
+    pub cache: Option<Cache>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Profile {
+    #[serde(default)]
+    pub environment: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Tool {
+    pub command: Vec<String>,
+    pub version_contains: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Compose {
+    pub file: String,
+    pub service: String,
+    pub project: String,
+    #[serde(default)]
+    pub build: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Cache {
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
 }
 
 fn current_directory() -> String {
@@ -54,6 +102,7 @@ pub enum ValueType {
     Boolean,
     Integer,
     Enum,
+    Url,
 }
 
 impl ValueType {
@@ -61,8 +110,15 @@ impl ValueType {
         match self {
             Self::String => true,
             Self::Boolean => matches!(value, "true" | "false"),
-            Self::Integer => value.parse::<i64>().is_ok(),
+            Self::Integer => {
+                let digits = value.strip_prefix('-').unwrap_or(value);
+                value == "0"
+                    || (!digits.is_empty()
+                        && !digits.starts_with('0')
+                        && digits.bytes().all(|c| c.is_ascii_digit()))
+            }
             Self::Enum => values.iter().any(|candidate| candidate == value),
+            Self::Url => url::Url::parse(value).is_ok(),
         }
     }
 }
@@ -90,17 +146,27 @@ pub enum Visibility {
     Secret,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Plan {
     pub profile: String,
     pub tasks: Vec<PlannedTask>,
+    pub tools: BTreeMap<String, Tool>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PlannedTask {
     pub id: String,
     pub command: Vec<String>,
     pub working_directory: String,
     pub environment: BTreeMap<String, String>,
     pub destructive: bool,
+    pub depends_on: Vec<String>,
+    pub cleanup: Vec<Vec<String>>,
+    pub timeout_seconds: Option<u64>,
+    pub exclusive: Vec<String>,
+    pub requires: Vec<String>,
+    pub consumers: Vec<String>,
+    pub pass_environment: Vec<String>,
+    pub compose: Option<Compose>,
+    pub cache: Option<Cache>,
 }

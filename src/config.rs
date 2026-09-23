@@ -58,12 +58,46 @@ fn load_fragment(path: &Path, root: &Path, visited: &mut BTreeSet<PathBuf>) -> R
                 return Err(format!("Duplicate variable: {id}"));
             }
         }
+        for (id, profile) in fragment.profiles {
+            if manifest.profiles.insert(id.clone(), profile).is_some() {
+                return Err(format!("Duplicate profile: {id}"));
+            }
+        }
+        for (id, tool) in fragment.tools {
+            if manifest.tools.insert(id.clone(), tool).is_some() {
+                return Err(format!("Duplicate tool: {id}"));
+            }
+        }
     }
     Ok(manifest)
 }
 
 fn validate(manifest: &Manifest) -> Result<()> {
+    for (id, tool) in &manifest.tools {
+        if tool.command.is_empty() || tool.command[0].is_empty() {
+            return Err(format!("{id}: tool needs a version probe command"));
+        }
+    }
+
+    for profile in manifest.profiles.values() {
+        for name in profile.environment.keys() {
+            if manifest
+                .variables
+                .get(name)
+                .is_some_and(|v| v.visibility == Visibility::Secret)
+            {
+                return Err(format!("{name}: profile must not contain secret values"));
+            }
+        }
+    }
+
     for (name, variable) in &manifest.variables {
+        if !crate::environment::valid_name(name) {
+            return Err(format!("Invalid environment variable name: {name}"));
+        }
+        if matches!(variable.kind, crate::model::ValueType::Enum) && variable.values.is_empty() {
+            return Err(format!("{name}: enum requires values"));
+        }
         if variable.browser_exposed && variable.visibility != Visibility::Public {
             return Err(format!(
                 "{name}: browser exposure requires public visibility"
@@ -73,10 +107,84 @@ fn validate(manifest: &Manifest) -> Result<()> {
             return Err(format!("{name}: declare at least one consumer"));
         }
     }
+
     for (id, task) in &manifest.tasks {
-        if task.command.is_empty() && task.depends_on.is_empty() {
+        if task.command.is_empty() && task.depends_on.is_empty() && task.compose.is_none() {
             return Err(format!("{id}: task needs a command or dependencies"));
         }
+
+        if task.compose.is_some() && !task.command.is_empty() {
+            return Err(format!("{id}: choose command or compose"));
+        }
+
+        if let Some(compose) = &task.compose
+            && (compose.service.is_empty()
+                || compose.service.starts_with('-')
+                || compose.project.is_empty()
+                || !compose
+                    .project
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'))
+        {
+            return Err(format!("{id}: invalid Compose service or project"));
+        }
+
+        if task
+            .cleanup
+            .iter()
+            .any(|command| command.is_empty() || command[0].is_empty())
+        {
+            return Err(format!("{id}: cleanup commands must have an executable"));
+        }
+
+        for name in &task.requires {
+            if !manifest.tools.contains_key(name) {
+                return Err(format!("{id}: unknown tool {name}"));
+            }
+        }
+
+        if task.timeout_seconds == Some(0) {
+            return Err(format!("{id}: timeout must be positive"));
+        }
+
+        if let Some(cache) = &task.cache {
+            if cache.inputs.is_empty()
+                || cache.outputs.is_empty()
+                || task.destructive
+                || task.compose.is_some()
+                || task.command.is_empty()
+                || !task.cleanup.is_empty()
+            {
+                return Err(format!(
+                    "{id}: cache requires inputs/outputs and a non-destructive process task"
+                ));
+            }
+            if manifest.variables.values().any(|variable| {
+                variable.visibility == Visibility::Secret
+                    && variable
+                        .consumers
+                        .iter()
+                        .any(|c| task.consumers.contains(c))
+            }) || task.pass_environment.iter().any(|name| {
+                manifest
+                    .variables
+                    .get(name)
+                    .is_none_or(|v| v.visibility == Visibility::Secret)
+            }) {
+                return Err(format!(
+                    "{id}: secret or unclassified environment inputs cannot be cached"
+                ));
+            }
+        }
+
+        for name in &task.pass_environment {
+            if manifest.variables.contains_key(name) {
+                return Err(format!(
+                    "{id}: use consumers for contracted environment variable {name}"
+                ));
+            }
+        }
+
         if task
             .command
             .first()
@@ -84,19 +192,30 @@ fn validate(manifest: &Manifest) -> Result<()> {
         {
             return Err(format!("{id}: command executable cannot be empty"));
         }
+
         for dependency in &task.depends_on {
             if !manifest.tasks.contains_key(dependency) {
                 return Err(format!("{id}: unknown dependency {dependency}"));
             }
         }
+
         for (name, parameter) in &task.parameters {
+            if matches!(parameter.kind, crate::model::ValueType::Enum)
+                && parameter.values.is_empty()
+            {
+                return Err(format!("{id}: enum parameter {name} requires values"));
+            }
             if let Some(default) = &parameter.default
                 && !parameter.kind.accepts(default, &parameter.values)
             {
                 return Err(format!("{id}: invalid default for parameter {name}"));
             }
         }
+
         for name in task.environment.keys() {
+            if !crate::environment::valid_name(name) {
+                return Err(format!("{id}: invalid environment name"));
+            }
             if manifest
                 .variables
                 .get(name)
@@ -124,12 +243,15 @@ fn check_cycle(
     if done.contains(id) {
         return Ok(());
     }
+
     if !active.insert(id.into()) {
         return Err(format!("Task dependency cycle at {id}"));
     }
+
     for dependency in &manifest.tasks[id].depends_on {
         check_cycle(dependency, manifest, active, done)?;
     }
+
     active.remove(id);
     done.insert(id.into());
     Ok(())
