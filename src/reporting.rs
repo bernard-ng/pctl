@@ -3,7 +3,9 @@ use crate::{Result, execution::ExecutionReport};
 
 pub fn render(report: &ExecutionReport, format: &str) -> Result<String> {
     match format {
-        "json" => serde_json::to_string_pretty(report).map_err(|e| e.to_string()),
+        "json" => serde_json::to_string_pretty(report).map_err(|error| {
+            crate::error::Error::from(format!("Cannot render JSON report: {error}"))
+        }),
         "ndjson" => {
             let mut lines = Vec::new();
             for task in &report.tasks {

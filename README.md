@@ -2,6 +2,26 @@
 
 pctl plans and runs repository operations from TOML. The first implementation provides a Rust library and a CLI for task discovery, dependency planning, sequential process execution, and environment contract validation.
 
+## Install
+
+Install the latest statically linked Linux release on an `x86_64` or `aarch64` host:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/bernard-ng/pctl/main/deploy/install.sh | sudo bash
+```
+
+Containers that already run as root do not need `sudo`. Set `PCTL_INSTALL_DIR` to choose another destination:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/bernard-ng/pctl/main/deploy/install.sh | PCTL_INSTALL_DIR=/opt/bin bash
+```
+
+Remove the executable while preserving project manifests and local state:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/bernard-ng/pctl/main/deploy/uninstall.sh | sudo bash -s -- --yes
+```
+
 ## Start
 
 ```sh

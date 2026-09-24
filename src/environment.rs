@@ -16,24 +16,27 @@ pub fn load(file: Option<&Path>) -> Result<Environment> {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            let (name, value) = line
-                .split_once('=')
-                .ok_or_else(|| format!("Invalid environment assignment on line {}", index + 1))?;
+            let (name, value) = line.split_once('=').ok_or_else(|| {
+                crate::error::Error::from(format!(
+                    "Invalid environment assignment on line {}",
+                    index + 1
+                ))
+            })?;
             let name = name.trim();
             if !valid_name(name) {
-                return Err(format!("Invalid environment name on line {}", index + 1));
+                return Err(format!("Invalid environment name on line {}", index + 1).into());
             }
             let value = value.trim();
             let value = if value.starts_with('"') || value.starts_with('\'') {
                 if value.len() < 2 || value.chars().next() != value.chars().last() {
-                    return Err(format!("Unclosed quote on line {}", index + 1));
+                    return Err(format!("Unclosed quote on line {}", index + 1).into());
                 }
                 &value[1..value.len() - 1]
             } else {
                 value
             };
             if result.insert(name.into(), value.into()).is_some() {
-                return Err(format!("Duplicate environment name {name}"));
+                return Err(format!("Duplicate environment name {name}").into());
             }
         }
     }
@@ -93,14 +96,13 @@ pub fn resolve(
         let value = task.environment.get(name).or_else(|| source.get(name));
         if let Some(value) = value {
             if !variable.kind.accepts(value, &variable.values) {
-                return Err(format!("{name}: invalid value for task {}", task.id));
+                return Err(format!("{name}: invalid value for task {}", task.id).into());
             }
             environment.insert(name.clone(), value.clone());
         } else if variable.required_in.iter().any(|p| p == profile) {
-            return Err(format!(
-                "{name}: required by task {} in profile {profile}",
-                task.id
-            ));
+            return Err(
+                format!("{name}: required by task {} in profile {profile}", task.id).into(),
+            );
         }
     }
     for (name, value) in &task.environment {
@@ -110,7 +112,7 @@ pub fn resolve(
                 .iter()
                 .any(|c| task.consumers.contains(c))
         {
-            return Err(format!("{}: not a consumer of {name}", task.id));
+            return Err(format!("{}: not a consumer of {name}", task.id).into());
         }
         environment.insert(name.clone(), value.clone());
     }

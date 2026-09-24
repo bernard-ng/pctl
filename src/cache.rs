@@ -13,9 +13,9 @@ pub fn hash(bytes: &[u8]) -> String {
 
 fn hash_path(root: &Path, relative: &Path, hasher: &mut Sha256) -> Result<()> {
     let path = paths::inside(root, relative)?;
-    let metadata = path
-        .metadata()
-        .map_err(|_| format!("Missing cache path: {}", relative.display()))?;
+    let metadata = path.metadata().map_err(|_| {
+        crate::error::Error::from(format!("Missing cache path: {}", relative.display()))
+    })?;
     let name = relative.to_string_lossy();
     hasher.update((name.len() as u64).to_le_bytes());
     hasher.update(name.as_bytes());

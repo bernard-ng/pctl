@@ -183,6 +183,6 @@ fn capture_errors_on_overflow_and_stops_the_process() {
         &Cancellation::default(),
     )
     .unwrap_err();
-    assert!(error.contains("1 MiB"), "{error}");
+    assert!(error.to_string().contains("1 MiB"), "{error}");
     assert!(started.elapsed() < Duration::from_secs(5));
 }

@@ -342,7 +342,7 @@ fn run_task(
         Ok(code) => report.exit_code = code,
         Err(error) => {
             report.exit_code = 2;
-            report.message = Some(error);
+            report.message = Some(error.to_string());
         }
     }
     if report.exit_code != 0 {
@@ -368,19 +368,19 @@ pub fn preflight(plan: &Plan, root: &Path, allow_destructive: bool) -> Result<Ve
                 return Err("Plan must be topologically ordered with unique tasks".into());
             }
             if task.destructive && !allow_destructive {
-                return Err(format!("{}: requires --allow-destructive", task.id));
+                return Err(format!("{}: requires --allow-destructive", task.id).into());
             }
             if task.command.first().is_some_and(|s| s.is_empty()) {
                 return Err("Empty task executable".into());
             }
             let directory = paths::inside(&root, Path::new(&task.working_directory))?;
             if !directory.is_dir() {
-                return Err(format!("{}: missing working directory", task.id));
+                return Err(format!("{}: missing working directory", task.id).into());
             }
             if let Some(compose) = &task.compose
                 && !paths::inside(&directory, Path::new(&compose.file))?.is_file()
             {
-                return Err(format!("{}: missing Compose file", task.id));
+                return Err(format!("{}: missing Compose file", task.id).into());
             }
             if let Some(cache) = &task.cache {
                 for path in cache.inputs.iter().chain(&cache.outputs) {

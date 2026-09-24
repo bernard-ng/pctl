@@ -33,18 +33,20 @@ pub fn probe(
             Some(Duration::from_secs(10)),
             cancellation,
         )
-        .map_err(|_| format!("{name}: unable to execute version probe"))?;
+        .map_err(|_| {
+            crate::error::Error::from(format!("{name}: unable to execute version probe"))
+        })?;
         if code != 0 {
-            return Err(format!("{name}: version probe failed ({code})"));
+            return Err(format!("{name}: version probe failed ({code})").into());
         }
         if tool
             .version_contains
             .as_ref()
             .is_some_and(|required| !output.contains(required))
         {
-            return Err(format!(
-                "{name}: installed version does not match version_contains"
-            ));
+            return Err(
+                format!("{name}: installed version does not match version_contains").into(),
+            );
         }
         versions.insert(name, output.trim().into());
     }

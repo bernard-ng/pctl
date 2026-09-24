@@ -93,7 +93,7 @@ fn parameter_map(parameters: Vec<(String, String)>) -> Result<BTreeMap<String, S
     let mut map = BTreeMap::new();
     for (key, value) in parameters {
         if map.insert(key.clone(), value).is_some() {
-            return Err(format!("Repeated parameter: {key}"));
+            return Err(format!("Repeated parameter: {key}").into());
         }
     }
     Ok(map)
@@ -154,7 +154,7 @@ fn run(cli: Cli) -> Result<i32> {
                     std::path::Path::new(&task.working_directory),
                 )?;
                 if !directory.is_dir() {
-                    return Err(format!("{id}: missing working directory"));
+                    return Err(format!("{id}: missing working directory").into());
                 }
             }
             tools::probe(

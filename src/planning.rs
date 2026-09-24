@@ -40,18 +40,18 @@ fn visit(
         return Ok(());
     }
     if !active.insert(id.into()) {
-        return Err(format!("Task dependency cycle at {id}"));
+        return Err(format!("Task dependency cycle at {id}").into());
     }
     let task = manifest
         .tasks
         .get(id)
         .ok_or_else(|| format!("Unknown task: {id}"))?;
     if !task.profiles.is_empty() && !task.profiles.iter().any(|p| p == profile) {
-        return Err(format!("{id}: unavailable in profile {profile}"));
+        return Err(format!("{id}: unavailable in profile {profile}").into());
     }
     for name in supplied.keys() {
         if !task.parameters.contains_key(name) {
-            return Err(format!("{id}: unknown parameter {name}"));
+            return Err(format!("{id}: unknown parameter {name}").into());
         }
     }
     let mut parameters = BTreeMap::new();
@@ -61,7 +61,7 @@ fn visit(
             .or(definition.default.as_ref())
             .ok_or_else(|| format!("{id}: missing parameter {name}"))?;
         if !definition.kind.accepts(value, &definition.values) {
-            return Err(format!("{id}: invalid parameter {name}"));
+            return Err(format!("{id}: invalid parameter {name}").into());
         }
         parameters.insert(name.clone(), value.clone());
     }
@@ -79,19 +79,16 @@ fn visit(
     let command = task
         .command
         .iter()
-        .map(|argument| {
+        .map(|argument| -> Result<String> {
             if let Some(name) = argument
                 .strip_prefix("{param:")
                 .and_then(|s| s.strip_suffix('}'))
             {
-                parameters
-                    .get(name)
-                    .cloned()
-                    .ok_or_else(|| format!("{id}: unknown parameter reference {name}"))
+                parameters.get(name).cloned().ok_or_else(|| {
+                    crate::error::Error::from(format!("{id}: unknown parameter reference {name}"))
+                })
             } else if argument.contains("{param:") {
-                Err(format!(
-                    "{id}: parameter references must occupy an entire argument"
-                ))
+                Err(format!("{id}: parameter references must occupy an entire argument").into())
             } else {
                 Ok(argument.clone())
             }

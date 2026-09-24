@@ -45,7 +45,11 @@ impl SignalGuard {
                 let registration = unsafe {
                     signal_hook::low_level::register(signal, move || cancel.cancel(signal))
                 }
-                .map_err(|error| format!("Unable to register process signal handler: {error}"))?;
+                .map_err(|error| {
+                    crate::error::Error::from(format!(
+                        "Unable to register process signal handler: {error}"
+                    ))
+                })?;
                 guard.registrations.push(registration);
             }
             Ok(guard)
@@ -328,12 +332,18 @@ mod unix {
             .stderr(Stdio::piped())
             .process_group(0)
             .spawn()
-            .map_err(|error| format!("Unable to start task process: {error}"))?;
+            .map_err(|error| {
+                crate::error::Error::from(format!("Unable to start task process: {error}"))
+            })?;
         let mut child = SupervisedChild(child);
         let mut stdout = Output::new(child.0.stdout.take().expect("piped stdout"), secrets)
-            .map_err(|error| format!("Unable to configure task stdout: {error}"))?;
+            .map_err(|error| {
+                crate::error::Error::from(format!("Unable to configure task stdout: {error}"))
+            })?;
         let mut stderr = Output::new(child.0.stderr.take().expect("piped stderr"), secrets)
-            .map_err(|error| format!("Unable to configure task stderr: {error}"))?;
+            .map_err(|error| {
+                crate::error::Error::from(format!("Unable to configure task stderr: {error}"))
+            })?;
         let started = Instant::now();
         let mut stopping: Option<(Instant, i32)> = None;
         let code = loop {
@@ -354,11 +364,9 @@ mod unix {
             if stopping.is_some_and(|(when, _)| when.elapsed() >= Duration::from_secs(1)) {
                 child.signal(libc::SIGKILL);
             }
-            if let Some(status) = child
-                .0
-                .try_wait()
-                .map_err(|error| format!("Unable to poll task process: {error}"))?
-            {
+            if let Some(status) = child.0.try_wait().map_err(|error| {
+                crate::error::Error::from(format!("Unable to poll task process: {error}"))
+            })? {
                 break stopping.map(|(_, code)| code).unwrap_or_else(|| {
                     status.code().unwrap_or(128 + status.signal().unwrap_or(1))
                 });
@@ -366,7 +374,9 @@ mod unix {
             stdout
                 .drain(output)
                 .and_then(|()| stderr.drain(output))
-                .map_err(|error| format!("Unable to stream task output: {error}"))?;
+                .map_err(|error| {
+                    crate::error::Error::from(format!("Unable to stream task output: {error}"))
+                })?;
             std::thread::sleep(Duration::from_millis(10));
         };
         child.signal(libc::SIGKILL);
@@ -377,7 +387,9 @@ mod unix {
             stdout
                 .drain(output)
                 .and_then(|()| stderr.drain(output))
-                .map_err(|error| format!("Unable to drain task output: {error}"))?;
+                .map_err(|error| {
+                    crate::error::Error::from(format!("Unable to drain task output: {error}"))
+                })?;
             if !(stdout.finished && stderr.finished) {
                 std::thread::sleep(Duration::from_millis(1));
             }
@@ -385,7 +397,9 @@ mod unix {
         stdout
             .finish(output)
             .and_then(|()| stderr.finish(output))
-            .map_err(|error| format!("Unable to finish task output: {error}"))?;
+            .map_err(|error| {
+                crate::error::Error::from(format!("Unable to finish task output: {error}"))
+            })?;
         Ok(code)
     }
 

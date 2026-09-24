@@ -25,9 +25,7 @@ pub fn render(manifest: &Manifest, profile: &str) -> Result<BTreeMap<String, Str
             return Err("Environment variable names must match [A-Za-z_][A-Za-z0-9_]*".into());
         }
         if variable.browser_exposed && variable.visibility != Visibility::Public {
-            return Err(format!(
-                "{name}: browser exposure requires public visibility"
-            ));
+            return Err(format!("{name}: browser exposure requires public visibility").into());
         }
         let mut schema = json!({ "type": "string" });
         let kind = match variable.kind {
@@ -47,7 +45,7 @@ pub fn render(manifest: &Manifest, profile: &str) -> Result<BTreeMap<String, Str
             }
             ValueType::Enum => {
                 if variable.values.is_empty() {
-                    return Err(format!("{name}: enum requires declared values"));
+                    return Err(format!("{name}: enum requires declared values").into());
                 }
                 let mut values = variable.values.clone();
                 values.sort();
@@ -125,9 +123,9 @@ fn markdown_cell(value: &str) -> String {
 }
 
 fn pretty_json(value: &Value) -> Result<String> {
-    serde_json::to_string_pretty(value)
+    Ok(serde_json::to_string_pretty(value)
         .map(|text| text + "\n")
-        .map_err(|error| format!("Cannot render environment schema: {error}"))
+        .map_err(|error| format!("Cannot render environment schema: {error}"))?)
 }
 
 /// Check exact bytes or replace each generated file atomically. Other files are preserved.
@@ -145,7 +143,7 @@ pub fn generate(manifest: &Manifest, profile: &str, output: &Path, check: bool) 
                 format!("Generated artifact missing or unreadable: {name}: {error}")
             })?;
             if actual != expected.as_bytes() {
-                return Err(format!("Generated artifact drift: {name}"));
+                return Err(format!("Generated artifact drift: {name}").into());
             }
         }
         return Ok(());
@@ -170,11 +168,11 @@ fn inspect_directory(output: &Path) -> Result<()> {
         path.push(component);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
-                return Err(format!("Unsafe output directory: {}", path.display()));
+                return Err(format!("Unsafe output directory: {}", path.display()).into());
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("Cannot inspect output directory: {error}")),
+            Err(error) => return Err(format!("Cannot inspect output directory: {error}").into()),
         }
     }
     Ok(())
@@ -183,11 +181,11 @@ fn inspect_directory(output: &Path) -> Result<()> {
 fn inspect_file(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
-            Err(format!("Unsafe generated artifact: {}", path.display()))
+            Err(format!("Unsafe generated artifact: {}", path.display()).into())
         }
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("Cannot inspect generated artifact: {error}")),
+        Err(error) => Err(format!("Cannot inspect generated artifact: {error}").into()),
     }
 }
 
@@ -212,7 +210,7 @@ fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
         {
             Ok(file) => break (TemporaryFile(temporary), file),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(format!("Cannot stage generated artifact: {error}")),
+            Err(error) => return Err(format!("Cannot stage generated artifact: {error}").into()),
         }
     };
     file.write_all(content)
@@ -220,6 +218,6 @@ fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
         .map_err(|error| format!("Cannot write generated artifact: {error}"))?;
     drop(file);
     inspect_file(path)?;
-    fs::rename(&temporary.0, path)
-        .map_err(|error| format!("Cannot replace generated artifact: {error}"))
+    Ok(fs::rename(&temporary.0, path)
+        .map_err(|error| format!("Cannot replace generated artifact: {error}"))?)
 }

@@ -24,7 +24,7 @@ struct Call {
 #[derive(Default)]
 struct FakeExecutor {
     calls: Mutex<Vec<Call>>,
-    outcomes: BTreeMap<String, pctl::Result<i32>>,
+    outcomes: BTreeMap<String, Result<i32, String>>,
     write_output: bool,
     cancel_primary: bool,
 }
@@ -47,7 +47,11 @@ impl ProcessExecutor for FakeExecutor {
             let input = fs::read(request.directory.join("input.txt")).unwrap();
             fs::write(request.directory.join("output.txt"), input).unwrap();
         }
-        self.outcomes.get(&name).cloned().unwrap_or(Ok(0))
+        match self.outcomes.get(&name) {
+            Some(Ok(code)) => Ok(*code),
+            Some(Err(error)) => Err(error.clone().into()),
+            None => Ok(0),
+        }
     }
 }
 

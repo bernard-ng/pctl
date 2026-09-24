@@ -82,7 +82,11 @@ fn reports_toml_field_paths_for_invalid_values() {
         Ok(_) => panic!("invalid manifest should fail"),
         Err(error) => error,
     };
-    assert!(error.contains("tasks.api.parameters.filter.type"));
+    assert!(
+        error
+            .to_string()
+            .contains("tasks.api.parameters.filter.type")
+    );
 }
 
 #[test]
@@ -130,6 +134,7 @@ required_in = ["production"]
         &BTreeMap::from([("TOKEN".into(), "private-value".into())]),
     )
     .unwrap_err();
+    let error = error.to_string();
     assert!(error.contains("TOKEN"));
     assert!(!error.contains("private-value"));
 }

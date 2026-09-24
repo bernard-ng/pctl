@@ -1,5 +1,8 @@
-use crate::Result;
-use crate::model::{Manifest, Visibility};
+use crate::{
+    Result,
+    error::Error,
+    model::{Manifest, Visibility},
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -10,9 +13,10 @@ pub struct Project {
 
 impl Project {
     pub fn load(path: &Path) -> Result<Self> {
-        let path = path
-            .canonicalize()
-            .map_err(|e| format!("Cannot open manifest: {e}"))?;
+        let path = path.canonicalize().map_err(|source| Error::Io {
+            context: "Cannot open manifest".into(),
+            source,
+        })?;
         let root = path
             .parent()
             .ok_or("Manifest has no parent directory")?
@@ -25,50 +29,52 @@ impl Project {
 }
 
 fn load_fragment(path: &Path, root: &Path, visited: &mut BTreeSet<PathBuf>) -> Result<Manifest> {
-    let path = path
-        .canonicalize()
-        .map_err(|e| format!("Cannot resolve include: {e}"))?;
+    let path = path.canonicalize().map_err(|source| Error::Io {
+        context: "Cannot resolve include".into(),
+        source,
+    })?;
     if !path.starts_with(root) {
         return Err("Manifest includes must stay inside the project".into());
     }
     if !visited.insert(path.clone()) {
-        return Err(format!("Repeated or cyclic include: {}", path.display()));
+        return Err(format!("Repeated or cyclic include: {}", path.display()).into());
     }
-    let source =
-        std::fs::read_to_string(&path).map_err(|e| format!("Cannot read manifest: {e}"))?;
-    let deserializer = toml::Deserializer::parse(&source)
-        .map_err(|error| format!("Invalid TOML in {}: {error}", path.display()))?;
-    let mut manifest: Manifest = serde_path_to_error::deserialize(deserializer).map_err(|error| {
-        let location = error.path().to_string();
-        format!(
-            "Invalid manifest in {} at {}",
-            path.display(),
-            location
-        )
+    let source = std::fs::read_to_string(&path).map_err(|source| Error::Io {
+        context: "Cannot read manifest".into(),
+        source,
     })?;
+    let deserializer = toml::Deserializer::parse(&source).map_err(|source| Error::InvalidToml {
+        path: path.clone(),
+        source,
+    })?;
+    let mut manifest: Manifest =
+        serde_path_to_error::deserialize(deserializer).map_err(|error| Error::InvalidManifest {
+            path: path.clone(),
+            location: error.path().to_string(),
+        })?;
     if manifest.schema_version != 1 {
-        return Err(format!("Unsupported schema version in {}", path.display()));
+        return Err(format!("Unsupported schema version in {}", path.display()).into());
     }
     for include in std::mem::take(&mut manifest.include) {
         let fragment = load_fragment(&root.join(include), root, visited)?;
         for (id, task) in fragment.tasks {
             if manifest.tasks.insert(id.clone(), task).is_some() {
-                return Err(format!("Duplicate task: {id}"));
+                return Err(format!("Duplicate task: {id}").into());
             }
         }
         for (id, variable) in fragment.variables {
             if manifest.variables.insert(id.clone(), variable).is_some() {
-                return Err(format!("Duplicate variable: {id}"));
+                return Err(format!("Duplicate variable: {id}").into());
             }
         }
         for (id, profile) in fragment.profiles {
             if manifest.profiles.insert(id.clone(), profile).is_some() {
-                return Err(format!("Duplicate profile: {id}"));
+                return Err(format!("Duplicate profile: {id}").into());
             }
         }
         for (id, tool) in fragment.tools {
             if manifest.tools.insert(id.clone(), tool).is_some() {
-                return Err(format!("Duplicate tool: {id}"));
+                return Err(format!("Duplicate tool: {id}").into());
             }
         }
     }
@@ -78,7 +84,7 @@ fn load_fragment(path: &Path, root: &Path, visited: &mut BTreeSet<PathBuf>) -> R
 fn validate(manifest: &Manifest) -> Result<()> {
     for (id, tool) in &manifest.tools {
         if tool.command.is_empty() || tool.command[0].is_empty() {
-            return Err(format!("{id}: tool needs a version probe command"));
+            return Err(format!("{id}: tool needs a version probe command").into());
         }
     }
 
@@ -89,35 +95,33 @@ fn validate(manifest: &Manifest) -> Result<()> {
                 .get(name)
                 .is_some_and(|v| v.visibility == Visibility::Secret)
             {
-                return Err(format!("{name}: profile must not contain secret values"));
+                return Err(format!("{name}: profile must not contain secret values").into());
             }
         }
     }
 
     for (name, variable) in &manifest.variables {
         if !crate::environment::valid_name(name) {
-            return Err(format!("Invalid environment variable name: {name}"));
+            return Err(format!("Invalid environment variable name: {name}").into());
         }
         if matches!(variable.kind, crate::model::ValueType::Enum) && variable.values.is_empty() {
-            return Err(format!("{name}: enum requires values"));
+            return Err(format!("{name}: enum requires values").into());
         }
         if variable.browser_exposed && variable.visibility != Visibility::Public {
-            return Err(format!(
-                "{name}: browser exposure requires public visibility"
-            ));
+            return Err(format!("{name}: browser exposure requires public visibility").into());
         }
         if variable.consumers.is_empty() {
-            return Err(format!("{name}: declare at least one consumer"));
+            return Err(format!("{name}: declare at least one consumer").into());
         }
     }
 
     for (id, task) in &manifest.tasks {
         if task.command.is_empty() && task.depends_on.is_empty() && task.compose.is_none() {
-            return Err(format!("{id}: task needs a command or dependencies"));
+            return Err(format!("{id}: task needs a command or dependencies").into());
         }
 
         if task.compose.is_some() && !task.command.is_empty() {
-            return Err(format!("{id}: choose command or compose"));
+            return Err(format!("{id}: choose command or compose").into());
         }
 
         if let Some(compose) = &task.compose
@@ -129,7 +133,7 @@ fn validate(manifest: &Manifest) -> Result<()> {
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'))
         {
-            return Err(format!("{id}: invalid Compose service or project"));
+            return Err(format!("{id}: invalid Compose service or project").into());
         }
 
         if task
@@ -137,17 +141,17 @@ fn validate(manifest: &Manifest) -> Result<()> {
             .iter()
             .any(|command| command.is_empty() || command[0].is_empty())
         {
-            return Err(format!("{id}: cleanup commands must have an executable"));
+            return Err(format!("{id}: cleanup commands must have an executable").into());
         }
 
         for name in &task.requires {
             if !manifest.tools.contains_key(name) {
-                return Err(format!("{id}: unknown tool {name}"));
+                return Err(format!("{id}: unknown tool {name}").into());
             }
         }
 
         if task.timeout_seconds == Some(0) {
-            return Err(format!("{id}: timeout must be positive"));
+            return Err(format!("{id}: timeout must be positive").into());
         }
 
         if let Some(cache) = &task.cache {
@@ -160,7 +164,8 @@ fn validate(manifest: &Manifest) -> Result<()> {
             {
                 return Err(format!(
                     "{id}: cache requires inputs/outputs and a non-destructive process task"
-                ));
+                )
+                .into());
             }
             if manifest.variables.values().any(|variable| {
                 variable.visibility == Visibility::Secret
@@ -176,7 +181,8 @@ fn validate(manifest: &Manifest) -> Result<()> {
             }) {
                 return Err(format!(
                     "{id}: secret or unclassified environment inputs cannot be cached"
-                ));
+                )
+                .into());
             }
         }
 
@@ -184,7 +190,8 @@ fn validate(manifest: &Manifest) -> Result<()> {
             if manifest.variables.contains_key(name) {
                 return Err(format!(
                     "{id}: use consumers for contracted environment variable {name}"
-                ));
+                )
+                .into());
             }
         }
 
@@ -193,12 +200,12 @@ fn validate(manifest: &Manifest) -> Result<()> {
             .first()
             .is_some_and(|program| program.is_empty())
         {
-            return Err(format!("{id}: command executable cannot be empty"));
+            return Err(format!("{id}: command executable cannot be empty").into());
         }
 
         for dependency in &task.depends_on {
             if !manifest.tasks.contains_key(dependency) {
-                return Err(format!("{id}: unknown dependency {dependency}"));
+                return Err(format!("{id}: unknown dependency {dependency}").into());
             }
         }
 
@@ -206,27 +213,27 @@ fn validate(manifest: &Manifest) -> Result<()> {
             if matches!(parameter.kind, crate::model::ValueType::Enum)
                 && parameter.values.is_empty()
             {
-                return Err(format!("{id}: enum parameter {name} requires values"));
+                return Err(format!("{id}: enum parameter {name} requires values").into());
             }
             if let Some(default) = &parameter.default
                 && !parameter.kind.accepts(default, &parameter.values)
             {
-                return Err(format!("{id}: invalid default for parameter {name}"));
+                return Err(format!("{id}: invalid default for parameter {name}").into());
             }
         }
 
         for name in task.environment.keys() {
             if !crate::environment::valid_name(name) {
-                return Err(format!("{id}: invalid environment name"));
+                return Err(format!("{id}: invalid environment name").into());
             }
             if manifest
                 .variables
                 .get(name)
                 .is_some_and(|variable| variable.visibility == Visibility::Secret)
             {
-                return Err(format!(
-                    "{id}: secret {name} must come from the process environment"
-                ));
+                return Err(
+                    format!("{id}: secret {name} must come from the process environment").into(),
+                );
             }
         }
     }
@@ -248,7 +255,7 @@ fn check_cycle(
     }
 
     if !active.insert(id.into()) {
-        return Err(format!("Task dependency cycle at {id}"));
+        return Err(format!("Task dependency cycle at {id}").into());
     }
 
     for dependency in &manifest.tasks[id].depends_on {
@@ -269,10 +276,10 @@ pub fn validate_environment(
     for (name, contract) in &manifest.variables {
         match values.get(name) {
             None if contract.required_in.iter().any(|p| p == profile) => {
-                return Err(format!("{name}: required for profile {profile}"));
+                return Err(format!("{name}: required for profile {profile}").into());
             }
             Some(value) if !contract.kind.accepts(value, &contract.values) => {
-                return Err(format!("{name}: invalid value for declared type"));
+                return Err(format!("{name}: invalid value for declared type").into());
             }
             _ => {}
         }

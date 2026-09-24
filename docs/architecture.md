@@ -20,7 +20,7 @@ SOLID is applied through narrow responsibilities, composition, and substitutable
 
 Manifest schema version 1 is explicit. Includes merge disjoint definitions; collisions fail. Plans preserve dependency declaration order and execute shared dependencies once. Root task parameters never leak into dependencies. Profiles restrict task availability rather than merging arbitrary configuration.
 
-The model currently uses public data structures and string diagnostics. Structural invariants are enforced on manifest loading and planning. The executor additionally checks execution-specific invariants before side effects. Stable diagnostic codes and opaque validated plan types are candidates for the next interface revision, before external library compatibility is promised.
+The model currently uses public data structures and a typed error boundary rendered as concise CLI diagnostics. Manifest parsing preserves field paths, while structural invariants are enforced on manifest loading and planning. The executor additionally checks execution-specific invariants before side effects. Stable diagnostic codes and opaque validated plan types are candidates for the next interface revision, before external library compatibility is promised.
 
 Commands use argument vectors. Parameters are resolved as whole arguments. Environment validation uses supplied values and never includes values in errors. A declaration's `consumers` field is metadata in this version; it is not a sandbox or an injection allowlist.
 

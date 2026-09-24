@@ -105,8 +105,8 @@ fn rejects_browser_secrets_and_injected_variable_names() {
 fn deterministic_generation_and_exact_read_only_drift_checks() {
     let manifest = manifest();
     assert_eq!(
-        render(&manifest, "production"),
-        render(&manifest, "production")
+        render(&manifest, "production").unwrap(),
+        render(&manifest, "production").unwrap()
     );
     let directory = tempfile::tempdir().unwrap();
     let output = directory.path().canonicalize().unwrap().join("generated");
@@ -121,6 +121,7 @@ fn deterministic_generation_and_exact_read_only_drift_checks() {
         assert!(
             generate(&manifest, "production", &output, true)
                 .unwrap_err()
+                .to_string()
                 .contains(&name)
         );
         generate(&manifest, "production", &output, false).unwrap();
@@ -128,6 +129,7 @@ fn deterministic_generation_and_exact_read_only_drift_checks() {
         assert!(
             generate(&manifest, "production", &output, true)
                 .unwrap_err()
+                .to_string()
                 .contains(&name)
         );
         assert!(!output.join(&name).exists());
