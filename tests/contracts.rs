@@ -182,3 +182,53 @@ fn preflights_entire_plan_before_any_side_effect() {
     assert!(execution::execute(&plan, &project.root, true, &executor).is_err());
     assert!(executor.calls.lock().unwrap().is_empty());
 }
+
+fn load_error(source: &str) -> String {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("pctl.toml");
+    std::fs::write(&path, source).unwrap();
+    Project::load(&path)
+        .err()
+        .expect("manifest is invalid")
+        .to_string()
+}
+
+#[test]
+fn validation_reports_every_problem_in_one_pass() {
+    let error = load_error(
+        r#"
+schema_version = 1
+[tasks.broken]
+description = "Several mistakes"
+command = ["echo", "{param:undeclared}", "prefix-{param:filter}"]
+depends_on = ["missing"]
+timeout_seconds = 0
+[tasks.empty]
+description = "Neither command nor dependencies"
+"#,
+    );
+    assert!(error.starts_with("5 problems found:"), "{error}");
+    for expected in [
+        "broken: unknown parameter reference undeclared",
+        "broken: parameter references must occupy an entire argument",
+        "broken: unknown dependency missing",
+        "broken: timeout must be positive",
+        "empty: task needs a command or dependencies",
+    ] {
+        assert!(error.contains(expected), "missing {expected:?} in {error}");
+    }
+}
+
+#[test]
+fn single_problem_is_reported_plainly_and_cycles_with_unknown_dependencies_do_not_panic() {
+    let error = load_error(
+        "schema_version = 1\n[tasks.a]\ndescription = 'a'\ndepends_on = ['b']\n[tasks.b]\ndescription = 'b'\ndepends_on = ['a']\n",
+    );
+    assert_eq!(error, "Task dependency cycle at a");
+
+    let error = load_error(
+        "schema_version = 1\n[tasks.a]\ndescription = 'a'\ndepends_on = ['ghost', 'a']\n",
+    );
+    assert!(error.contains("a: unknown dependency ghost"), "{error}");
+    assert!(error.contains("Task dependency cycle at a"), "{error}");
+}

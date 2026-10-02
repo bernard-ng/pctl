@@ -1,30 +1,31 @@
 //! Machine reports are written to stdout; child diagnostics use stderr.
-use crate::{Result, execution::ExecutionReport};
+use crate::{
+    Result,
+    execution::{ExecutionReport, TaskReport, TaskStatus},
+};
 
-pub fn render(report: &ExecutionReport, format: &str) -> Result<String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Format {
+    Terminal,
+    Json,
+    Ndjson,
+    Junit,
+}
+
+pub fn render(report: &ExecutionReport, format: Format) -> Result<String> {
     match format {
-        "json" => serde_json::to_string_pretty(report).map_err(|error| {
+        Format::Json => serde_json::to_string_pretty(report).map_err(|error| {
             crate::error::Error::from(format!("Cannot render JSON report: {error}"))
         }),
-        "ndjson" => {
+        Format::Ndjson => {
             let mut lines = Vec::new();
             for task in &report.tasks {
-                lines.push(
-                    serde_json::to_string(
-                        &serde_json::json!({"event":"task_finished","task":task}),
-                    )
-                    .map_err(|e| e.to_string())?,
-                );
+                lines.push(task_event(task)?);
             }
-            lines.push(
-                serde_json::to_string(
-                    &serde_json::json!({"event":"run_finished","exit_code":report.exit_code}),
-                )
-                .map_err(|e| e.to_string())?,
-            );
+            lines.push(run_event(report)?);
             Ok(lines.join("\n"))
         }
-        "junit" => {
+        Format::Junit => {
             let failures = report.tasks.iter().filter(|t| t.exit_code != 0).count();
             let mut xml = format!(
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<testsuite name=\"pctl\" tests=\"{}\" failures=\"{failures}\">\n",
@@ -36,7 +37,7 @@ pub fn render(report: &ExecutionReport, format: &str) -> Result<String> {
                     escape(&task.id),
                     task.duration_ms as f64 / 1000.0
                 ));
-                if task.status == "skipped" {
+                if task.status == TaskStatus::Skipped {
                     xml.push_str("<skipped/>");
                 }
                 if task.exit_code != 0 {
@@ -51,7 +52,7 @@ pub fn render(report: &ExecutionReport, format: &str) -> Result<String> {
             xml.push_str("</testsuite>");
             Ok(xml)
         }
-        "terminal" => Ok(report
+        Format::Terminal => Ok(report
             .tasks
             .iter()
             .map(|task| {
@@ -68,8 +69,21 @@ pub fn render(report: &ExecutionReport, format: &str) -> Result<String> {
             })
             .collect::<Vec<_>>()
             .join("\n")),
-        _ => Err("Unknown report format".into()),
     }
+}
+
+/// One NDJSON line for a finished (or skipped) task.
+pub fn task_event(task: &TaskReport) -> Result<String> {
+    Ok(serde_json::to_string(
+        &serde_json::json!({"event":"task_finished","task":task}),
+    )?)
+}
+
+/// The closing NDJSON line carrying the run's exit code.
+pub fn run_event(report: &ExecutionReport) -> Result<String> {
+    Ok(serde_json::to_string(
+        &serde_json::json!({"event":"run_finished","exit_code":report.exit_code}),
+    )?)
 }
 
 fn escape(input: &str) -> String {

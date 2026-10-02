@@ -3,10 +3,9 @@ use crate::Result;
 use crate::model::{Manifest, ValueType, Visibility};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Render declarations only; process environment and task overrides are never read.
 pub fn render(manifest: &Manifest, profile: &str) -> Result<BTreeMap<String, String>> {
@@ -21,7 +20,7 @@ pub fn render(manifest: &Manifest, profile: &str) -> Result<BTreeMap<String, Str
     );
 
     for (name, variable) in &manifest.variables {
-        if !valid_name(name) {
+        if !crate::environment::valid_name(name) {
             return Err("Environment variable names must match [A-Za-z_][A-Za-z0-9_]*".into());
         }
         if variable.browser_exposed && variable.visibility != Visibility::Public {
@@ -105,14 +104,6 @@ pub fn render(manifest: &Manifest, profile: &str) -> Result<BTreeMap<String, Str
     ]))
 }
 
-fn valid_name(name: &str) -> bool {
-    let mut bytes = name.bytes();
-    bytes
-        .next()
-        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
-        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-}
-
 fn markdown_cell(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -189,35 +180,30 @@ fn inspect_file(path: &Path) -> Result<()> {
     }
 }
 
-static TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
-
-struct TemporaryFile(PathBuf);
-
-impl Drop for TemporaryFile {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
-}
-
+/// Stage next to the target, then rename into place. The staged file gets the
+/// permissions an ordinary `File::create` would (0666 & umask) rather than the
+/// owner-only default of temporary files, so generated artifacts stay readable.
 fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
-    let (temporary, mut file) = loop {
-        let id = TEMPORARY_ID.fetch_add(1, Ordering::Relaxed);
-        let temporary = path.with_file_name(format!(".pctl-{}-{id}.tmp", std::process::id()));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-        {
-            Ok(file) => break (TemporaryFile(temporary), file),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(format!("Cannot stage generated artifact: {error}").into()),
-        }
-    };
-    file.write_all(content)
-        .and_then(|()| file.sync_all())
+    let directory = path
+        .parent()
+        .ok_or("Generated artifact has no parent directory")?;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(".pctl-").suffix(".tmp");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o666));
+    }
+    let mut staged = builder
+        .tempfile_in(directory)
+        .map_err(|error| format!("Cannot stage generated artifact: {error}"))?;
+    staged
+        .write_all(content)
+        .and_then(|()| staged.as_file().sync_all())
         .map_err(|error| format!("Cannot write generated artifact: {error}"))?;
-    drop(file);
     inspect_file(path)?;
-    Ok(fs::rename(&temporary.0, path)
-        .map_err(|error| format!("Cannot replace generated artifact: {error}"))?)
+    staged
+        .persist(path)
+        .map_err(|error| format!("Cannot replace generated artifact: {}", error.error))?;
+    Ok(())
 }

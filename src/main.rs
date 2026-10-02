@@ -1,21 +1,22 @@
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use pctl::{
     Result,
-    config::{Project, validate_environment},
+    config::{DEFAULT_PROFILE, Project, validate_environment, validate_profile},
     environment,
-    execution::{self, RunOptions},
+    execution::{self, RunOptions, TaskStatus},
     generation, planning,
     process::{Cancellation, SignalGuard},
-    reporting, tools,
+    reporting::{self, Format},
+    tools,
 };
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 #[derive(Parser)]
 #[command(version, about = "Plan and run repository operations")]
 struct Cli {
     #[arg(long, global = true, default_value = "pctl.toml")]
     manifest: PathBuf,
-    #[arg(long, global = true, default_value = "local")]
+    #[arg(long, global = true, default_value = DEFAULT_PROFILE)]
     profile: String,
     /// Explicit dotenv file; real process environment takes precedence.
     #[arg(long, global = true)]
@@ -51,16 +52,12 @@ enum Commands {
         force: bool,
         #[arg(long)]
         dry_run: bool,
-        #[arg(long, default_value = "terminal", value_parser = ["terminal", "json", "ndjson", "junit"])]
-        format: String,
+        #[arg(long, value_enum, default_value_t = Format::Terminal)]
+        format: Format,
     },
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
-    },
-    /// Generate CLI shell completions without loading a project.
-    Completions {
-        shell: clap_complete::Shell,
     },
 }
 
@@ -79,6 +76,28 @@ enum ConfigCommand {
     },
     /// Show a variable's declaration without reading its value.
     Explain { name: String },
+}
+
+/// Write to stdout, treating a closed pipe (`pctl list | head`) as a reader that
+/// is done rather than an error. `println!` would panic instead. SIGPIPE stays
+/// ignored on purpose: killing pctl outright would skip child-process cleanup.
+fn write_stdout(bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+    match stdout.write_all(bytes).and_then(|()| stdout.flush()) {
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(source) => Err(pctl::error::Error::Io {
+            context: "Cannot write to stdout".into(),
+            source,
+        }),
+        Ok(()) => Ok(()),
+    }
+}
+
+macro_rules! out {
+    ($($argument:tt)*) => {
+        write_stdout(format!("{}\n", format_args!($($argument)*)).as_bytes())?
+    };
 }
 
 fn parameter(input: &str) -> Result<(String, String)> {
@@ -101,13 +120,10 @@ fn parameter_map(parameters: Vec<(String, String)>) -> Result<BTreeMap<String, S
 
 fn print_plan(plan: &pctl::model::Plan, json: bool) -> Result<()> {
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(plan).map_err(|e| e.to_string())?
-        );
+        out!("{}", serde_json::to_string_pretty(plan)?);
     } else {
         for task in &plan.tasks {
-            println!(
+            out!(
                 "{}{}",
                 task.id,
                 if task.destructive {
@@ -122,17 +138,13 @@ fn print_plan(plan: &pctl::model::Plan, json: bool) -> Result<()> {
 }
 
 fn run(cli: Cli) -> Result<i32> {
-    if let Commands::Completions { shell } = cli.command {
-        clap_complete::generate(shell, &mut Cli::command(), "pctl", &mut std::io::stdout());
-        return Ok(0);
-    }
     let project = Project::load(&cli.manifest)?;
     let cancellation = Cancellation::default();
     let _signals = SignalGuard::install(cancellation.clone())?;
     match cli.command {
         Commands::List => {
             for (id, task) in &project.manifest.tasks {
-                println!("{id}\t{}", task.description);
+                out!("{id}\t{}", task.description);
             }
         }
         Commands::Graph => {
@@ -142,33 +154,41 @@ fn run(cli: Cli) -> Result<i32> {
                 .iter()
                 .map(|(id, task)| (id, &task.depends_on))
                 .collect();
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&edges).map_err(|e| e.to_string())?
-            );
+            out!("{}", serde_json::to_string_pretty(&edges)?);
         }
         Commands::Doctor => {
+            let mut problems = Vec::new();
             for (id, task) in &project.manifest.tasks {
-                let directory = pctl::paths::inside(
+                match pctl::paths::inside(
                     &project.root,
                     std::path::Path::new(&task.working_directory),
-                )?;
-                if !directory.is_dir() {
-                    return Err(format!("{id}: missing working directory").into());
+                ) {
+                    Ok(directory) if directory.is_dir() => {}
+                    Ok(_) => problems.push(format!("{id}: missing working directory")),
+                    Err(error) => problems.push(format!("{id}: {error}")),
                 }
             }
-            tools::probe(
+            let probes = tools::probe_all(
                 &project.manifest.tools,
                 project.manifest.tools.keys().cloned(),
                 &project.root,
                 &environment::load(None)?,
                 &cancellation,
             )?;
-            println!("Manifest, working directories, and declared tools are valid.");
+            problems.extend(
+                probes
+                    .into_iter()
+                    .filter_map(|(_, outcome)| outcome.err().map(|e| e.to_string())),
+            );
+            if !problems.is_empty() {
+                return Err(pctl::error::Error::Validation(problems));
+            }
+            out!("Manifest, working directories, and declared tools are valid.");
         }
         Commands::Config { command } => match command {
             ConfigCommand::Check { values } => {
                 if values {
+                    validate_profile(&project.manifest, &cli.profile)?;
                     let mut source = project
                         .manifest
                         .profiles
@@ -178,7 +198,7 @@ fn run(cli: Cli) -> Result<i32> {
                     source.extend(environment::load(cli.env_file.as_deref())?);
                     validate_environment(&project.manifest, &cli.profile, &source)?;
                 }
-                println!(
+                out!(
                     "Configuration contracts are valid{}.",
                     if values {
                         " for the selected environment"
@@ -188,9 +208,10 @@ fn run(cli: Cli) -> Result<i32> {
                 );
             }
             ConfigCommand::Generate { output, check } => {
+                validate_profile(&project.manifest, &cli.profile)?;
                 let output = pctl::paths::inside(&project.root, &output)?;
                 generation::generate(&project.manifest, &cli.profile, &output, check)?;
-                println!(
+                out!(
                     "Generated contracts {}.",
                     if check { "match" } else { "written" }
                 );
@@ -201,7 +222,7 @@ fn run(cli: Cli) -> Result<i32> {
                     .variables
                     .get(&name)
                     .ok_or("Unknown environment variable")?;
-                println!(
+                out!(
                     "{name}\ntype: {:?}\nvisibility: {:?}\nconsumers: {}\nrequired in: {}\nbrowser exposed: {}",
                     contract.kind,
                     contract.visibility,
@@ -216,6 +237,7 @@ fn run(cli: Cli) -> Result<i32> {
             parameters,
             json,
         } => {
+            validate_profile(&project.manifest, &cli.profile)?;
             print_plan(
                 &planning::build(
                     &project.manifest,
@@ -235,6 +257,7 @@ fn run(cli: Cli) -> Result<i32> {
             dry_run,
             format,
         } => {
+            validate_profile(&project.manifest, &cli.profile)?;
             let plan = planning::build(
                 &project.manifest,
                 &task,
@@ -255,6 +278,15 @@ fn run(cli: Cli) -> Result<i32> {
                 secrets: environment::secrets(&project.manifest, &source),
                 ..Default::default()
             };
+            if format == Format::Ndjson {
+                // Stream each task as it finishes so CI can follow progress; the
+                // observer cannot fail the run, and a closed pipe is already quiet.
+                options.on_task_finished = Some(Arc::new(|task| {
+                    if let Ok(line) = reporting::task_event(task) {
+                        let _ = write_stdout(format!("{line}\n").as_bytes());
+                    }
+                }));
+            }
             for task in &plan.tasks {
                 options.environments.insert(
                     task.id.clone(),
@@ -274,10 +306,19 @@ fn run(cli: Cli) -> Result<i32> {
                 &options,
                 &execution::LocalProcessExecutor,
             )?;
-            println!("{}", reporting::render(&report, &format)?);
+            if format == Format::Ndjson {
+                // Finished tasks were already streamed; only never-started ones remain.
+                for task in &report.tasks {
+                    if task.status == TaskStatus::Skipped {
+                        out!("{}", reporting::task_event(task)?);
+                    }
+                }
+                out!("{}", reporting::run_event(&report)?);
+            } else {
+                out!("{}", reporting::render(&report, format)?);
+            }
             return Ok(report.exit_code);
         }
-        Commands::Completions { .. } => unreachable!(),
     }
     Ok(0)
 }

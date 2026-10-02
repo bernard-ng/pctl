@@ -81,6 +81,13 @@ pub struct Cache {
     pub outputs: Vec<String>,
 }
 
+/// The parameter name when `argument` is exactly `{param:NAME}`.
+pub fn parameter_reference(argument: &str) -> Option<&str> {
+    argument
+        .strip_prefix("{param:")
+        .and_then(|rest| rest.strip_suffix('}'))
+}
+
 fn current_directory() -> String {
     ".".into()
 }

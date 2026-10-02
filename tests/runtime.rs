@@ -1,6 +1,6 @@
 use pctl::{
     environment,
-    execution::{ProcessExecutor, ProcessRequest, RunOptions, execute_with},
+    execution::{ProcessExecutor, ProcessRequest, RunOptions, TaskStatus, execute_with},
     model::{Cache, Compose, Manifest, Plan, PlannedTask},
 };
 use std::{
@@ -114,10 +114,10 @@ fn cleanup_runs_after_exit_failure_and_spawn_error_and_dependents_are_skipped() 
         assert_eq!(report.exit_code, expected_code);
         assert_eq!(report.failed.as_deref(), Some("primary"));
         assert!(report.completed.is_empty());
-        assert_eq!(report.tasks[0].status, "failed");
+        assert_eq!(report.tasks[0].status, TaskStatus::Failed);
         assert_eq!(report.tasks[0].cleanup_errors, 1);
         assert_eq!(report.tasks[0].message.as_deref(), expected_message);
-        assert_eq!(report.tasks[1].status, "skipped");
+        assert_eq!(report.tasks[1].status, TaskStatus::Skipped);
         let calls = executor.calls.lock().unwrap();
         assert_eq!(
             calls
@@ -149,7 +149,7 @@ fn cleanup_failure_turns_success_into_failure_for_exit_and_spawn_errors() {
         assert_ne!(report.exit_code, 0);
         assert_eq!(report.failed.as_deref(), Some("primary"));
         assert!(report.completed.is_empty());
-        assert_eq!(report.tasks[0].status, "failed");
+        assert_eq!(report.tasks[0].status, TaskStatus::Failed);
         assert_eq!(report.tasks[0].cleanup_errors, 1);
         assert_eq!(executor.calls.lock().unwrap().len(), 2);
     }
@@ -341,13 +341,13 @@ fn cache_verifies_inputs_and_outputs_and_force_bypasses_hit() {
     };
     let mut options = RunOptions::default();
     for (step, status, calls) in [
-        ("initial", "success", 1),
-        ("unchanged", "cached", 1),
-        ("input", "success", 2),
-        ("output", "success", 3),
-        ("missing-output", "success", 4),
-        ("warm", "cached", 4),
-        ("force", "success", 5),
+        ("initial", TaskStatus::Success, 1),
+        ("unchanged", TaskStatus::Cached, 1),
+        ("input", TaskStatus::Success, 2),
+        ("output", TaskStatus::Success, 3),
+        ("missing-output", TaskStatus::Success, 4),
+        ("warm", TaskStatus::Cached, 4),
+        ("force", TaskStatus::Success, 5),
     ] {
         match step {
             "input" => fs::write(root.path().join("input.txt"), "second").unwrap(),
@@ -366,6 +366,144 @@ fn cache_verifies_inputs_and_outputs_and_force_bypasses_hit() {
             fs::read(root.path().join("input.txt")).unwrap()
         );
     }
+}
+
+#[test]
+fn cache_hashes_nested_symlinks_by_target_but_rejects_symlinked_declarations() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("input.txt"), "data").unwrap();
+    fs::create_dir(root.path().join("tree")).unwrap();
+    fs::write(root.path().join("tree/file.txt"), "content").unwrap();
+    symlink("../input.txt", root.path().join("tree/link")).unwrap();
+    let cached = |inputs: &[&str]| {
+        let mut build = task("build");
+        build.cache = Some(Cache {
+            inputs: inputs.iter().map(|input| (*input).into()).collect(),
+            outputs: vec!["output.txt".into()],
+        });
+        plan(vec![build])
+    };
+    let executor = FakeExecutor {
+        write_output: true,
+        ..Default::default()
+    };
+    let options = RunOptions::default();
+    let run = |plan: &Plan| execute_with(plan, root.path(), &options, &executor).unwrap();
+
+    let nested = cached(&["tree", "input.txt"]);
+    assert_eq!(run(&nested).tasks[0].status, TaskStatus::Success);
+    assert_eq!(run(&nested).tasks[0].status, TaskStatus::Cached);
+
+    fs::remove_file(root.path().join("tree/link")).unwrap();
+    symlink("file.txt", root.path().join("tree/link")).unwrap();
+    assert_eq!(
+        run(&nested).tasks[0].status,
+        TaskStatus::Success,
+        "retargeted link"
+    );
+
+    symlink("tree", root.path().join("linked")).unwrap();
+    let error = execute_with(
+        &cached(&["linked", "input.txt"]),
+        root.path(),
+        &options,
+        &executor,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("symlinks"), "{error}");
+}
+
+#[test]
+fn observer_sees_each_finished_task_once_in_completion_order_but_not_skipped_ones() {
+    let root = tempfile::tempdir().unwrap();
+    let mut dependent = task("dependent");
+    dependent.depends_on = vec!["failing".into()];
+    let plan = plan(vec![task("passing"), task("failing"), dependent]);
+    let executor = FakeExecutor {
+        outcomes: BTreeMap::from([("failing".into(), Ok(42))]),
+        ..Default::default()
+    };
+    let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let observed = seen.clone();
+    let options = RunOptions {
+        on_task_finished: Some(std::sync::Arc::new(move |task| {
+            observed
+                .lock()
+                .unwrap()
+                .push((task.id.clone(), task.status));
+        })),
+        ..Default::default()
+    };
+    let report = execute_with(&plan, root.path(), &options, &executor).unwrap();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            ("passing".to_owned(), TaskStatus::Success),
+            ("failing".to_owned(), TaskStatus::Failed),
+        ]
+    );
+    assert_eq!(report.tasks[2].status, TaskStatus::Skipped);
+}
+
+#[test]
+fn profile_values_are_defaults_scoped_to_consumers_and_lose_to_process_and_task_values() {
+    let manifest: Manifest = toml::from_str(
+        r#"
+schema_version = 1
+[variables.API_URL]
+type = "string"
+visibility = "public"
+consumers = ["web"]
+required_in = ["local"]
+[profiles.local.environment]
+API_URL = "http://profile"
+UNDECLARED = "everywhere"
+"#,
+    )
+    .unwrap();
+    let mut lint = task("lint");
+    lint.consumers = vec!["tools".into()];
+    let mut web = task("web");
+    web.consumers = vec!["web".into()];
+    let resolve = |task: &PlannedTask, source: &[(&str, &str)]| {
+        let source = source
+            .iter()
+            .map(|(name, value)| ((*name).into(), (*value).into()))
+            .collect();
+        environment::resolve(&manifest, task, "local", &source)
+    };
+
+    // A profile value for a variable the task does not consume neither leaks in
+    // nor makes the task fail; undeclared profile entries apply to every task.
+    let environment = resolve(&lint, &[]).unwrap();
+    assert!(!environment.contains_key("API_URL"));
+    assert_eq!(environment["UNDECLARED"], "everywhere");
+
+    // Profile default < process environment < the task's own override. The
+    // profile also satisfies `required_in`.
+    assert_eq!(resolve(&web, &[]).unwrap()["API_URL"], "http://profile");
+    assert_eq!(
+        resolve(&web, &[("API_URL", "http://process")]).unwrap()["API_URL"],
+        "http://process"
+    );
+    web.environment
+        .insert("API_URL".into(), "http://task".into());
+    assert_eq!(
+        resolve(&web, &[("API_URL", "http://process")]).unwrap()["API_URL"],
+        "http://task"
+    );
+
+    // An explicit override of a variable the task does not consume is still refused.
+    lint.environment
+        .insert("API_URL".into(), "http://task".into());
+    assert!(
+        resolve(&lint, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("not a consumer of API_URL")
+    );
 }
 
 #[test]

@@ -1,10 +1,7 @@
-// Compile the assigned module without requiring changes to the library's module registry.
-pub use pctl::{Result, model};
-#[path = "../src/generation.rs"]
-mod generation;
-
-use generation::{generate, render};
-use model::{Manifest, ValueType, Variable, Visibility};
+use pctl::{
+    generation::{generate, render},
+    model::{Manifest, ValueType, Variable, Visibility},
+};
 use serde_json::{Value, json};
 use std::fs;
 

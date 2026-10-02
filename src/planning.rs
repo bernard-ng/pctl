@@ -1,5 +1,5 @@
 use crate::Result;
-use crate::model::{Manifest, Plan, PlannedTask};
+use crate::model::{Manifest, Plan, PlannedTask, parameter_reference};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Resolve a deterministic plan without accessing processes or the filesystem.
@@ -80,10 +80,7 @@ fn visit(
         .command
         .iter()
         .map(|argument| -> Result<String> {
-            if let Some(name) = argument
-                .strip_prefix("{param:")
-                .and_then(|s| s.strip_suffix('}'))
-            {
+            if let Some(name) = parameter_reference(argument) {
                 parameters.get(name).cloned().ok_or_else(|| {
                     crate::error::Error::from(format!("{id}: unknown parameter reference {name}"))
                 })
@@ -94,12 +91,6 @@ fn visit(
             }
         })
         .collect::<Result<Vec<_>>>()?;
-    let mut environment = manifest
-        .profiles
-        .get(profile)
-        .map(|p| p.environment.clone())
-        .unwrap_or_default();
-    environment.extend(task.environment.clone());
     let mut exclusive = task.exclusive.clone();
     if let Some(compose) = &task.compose {
         exclusive.push(format!("compose:{}", compose.project));
@@ -108,7 +99,8 @@ fn visit(
         id: id.into(),
         command,
         working_directory: task.working_directory.clone(),
-        environment,
+        // Task overrides only; profile defaults are layered in by `environment::resolve`.
+        environment: task.environment.clone(),
         destructive: task.destructive,
         depends_on: task.depends_on.clone(),
         cleanup: task.cleanup.clone(),

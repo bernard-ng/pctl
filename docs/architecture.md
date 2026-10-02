@@ -22,7 +22,7 @@ Manifest schema version 1 is explicit. Includes merge disjoint definitions; coll
 
 The model currently uses public data structures and a typed error boundary rendered as concise CLI diagnostics. Manifest parsing preserves field paths, while structural invariants are enforced on manifest loading and planning. The executor additionally checks execution-specific invariants before side effects. Stable diagnostic codes and opaque validated plan types are candidates for the next interface revision, before external library compatibility is promised.
 
-Commands use argument vectors. Parameters are resolved as whole arguments. Environment validation uses supplied values and never includes values in errors. A declaration's `consumers` field is metadata in this version; it is not a sandbox or an injection allowlist.
+Commands use argument vectors. Parameters are resolved as whole arguments. Environment validation uses supplied values and never includes values in errors. A declaration's `consumers` field scopes injection: a task's process receives a declared variable only when the task shares a consumer with it. This is not a sandbox, because a task's command can still read anything the user can. Precedence for a consumed variable is task override, then process environment, then profile default.
 
 ## Extension sequence
 

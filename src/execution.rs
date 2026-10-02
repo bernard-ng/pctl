@@ -1,6 +1,7 @@
 //! Dependency scheduling, resource ownership, and failure reporting.
 use crate::{
     Result, cache, compose,
+    error::Error,
     model::{Plan, PlannedTask},
     paths,
     process::{self, Cancellation},
@@ -10,9 +11,11 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
     path::{Path, PathBuf},
-    sync::mpsc,
+    sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
+
+const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
 pub struct ProcessRequest<'a> {
     pub command: &'a [String],
@@ -42,6 +45,11 @@ impl ProcessExecutor for LocalProcessExecutor {
     }
 }
 
+/// Called on the scheduling thread each time a task finishes (including cached
+/// and failed tasks), in completion order and before the run ends. Tasks that
+/// never start because of an earlier failure or cancellation are not reported.
+pub type TaskObserver = Arc<dyn Fn(&TaskReport) + Send + Sync>;
+
 #[derive(Default)]
 pub struct RunOptions {
     pub jobs: usize,
@@ -51,12 +59,33 @@ pub struct RunOptions {
     pub environments: BTreeMap<String, BTreeMap<String, String>>,
     pub tool_versions: BTreeMap<String, String>,
     pub secrets: Vec<String>,
+    pub on_task_finished: Option<TaskObserver>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskStatus {
+    Success,
+    Cached,
+    Failed,
+    Skipped,
+}
+
+impl std::fmt::Display for TaskStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Success => "success",
+            Self::Cached => "cached",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+        })
+    }
 }
 
 #[derive(Debug, Serialize)]
 pub struct TaskReport {
     pub id: String,
-    pub status: String,
+    pub status: TaskStatus,
     pub exit_code: i32,
     pub duration_ms: u128,
     pub cleanup_errors: usize,
@@ -103,10 +132,19 @@ pub fn execute_with(
     let mut pending: BTreeSet<usize> = (0..plan.tasks.len()).collect();
     let mut running = 0;
     let mut first_failure = None;
+    // Scheduling is re-attempted when a task finishes. Locks held by other pctl
+    // processes can be released at any time, so lock-blocked tasks are retried on
+    // a timer rather than on every poll of the cancellation flag.
+    let mut changed = true;
+    let mut next_lock_retry = Instant::now();
     let (sender, receiver) = mpsc::channel();
     std::thread::scope(|scope| -> Result<()> {
         loop {
-            if first_failure.is_none() && options.cancellation.signal() == 0 {
+            if first_failure.is_none()
+                && options.cancellation.signal() == 0
+                && (changed || Instant::now() >= next_lock_retry)
+            {
+                changed = false;
                 for index in pending.iter().copied().collect::<Vec<_>>() {
                     if running >= options.jobs.max(1) {
                         break;
@@ -120,10 +158,15 @@ pub fn execute_with(
                         continue;
                     }
                     let Some(locks) = acquire(&lock_dir, task)? else {
+                        next_lock_retry = Instant::now() + LOCK_RETRY_INTERVAL;
                         continue;
                     };
                     let directory = &directories[index];
                     let sender = sender.clone();
+                    // A cached task's identity includes its dependencies' fingerprints.
+                    // A dependency without one (it is not cached, or it ran without a
+                    // cache declaration) makes the result unknowable, so this task runs
+                    // uncached rather than risk a stale hit.
                     let stamps = task
                         .depends_on
                         .iter()
@@ -144,7 +187,7 @@ pub fn execute_with(
                         }))
                         .unwrap_or_else(|_| TaskReport {
                             id: task.id.clone(),
-                            status: "failed".into(),
+                            status: TaskStatus::Failed,
                             exit_code: 2,
                             duration_ms: 0,
                             cleanup_errors: 0,
@@ -169,8 +212,12 @@ pub fn execute_with(
                     if result.exit_code != 0 && first_failure.is_none() {
                         first_failure = Some((result.id.clone(), result.exit_code));
                     }
+                    if let Some(observer) = &options.on_task_finished {
+                        observer(&result);
+                    }
                     results.insert(result.id.clone(), result);
                     running -= 1;
+                    changed = true;
                 }
             } else {
                 std::thread::sleep(Duration::from_millis(20));
@@ -182,7 +229,7 @@ pub fn execute_with(
     for task in &plan.tasks {
         tasks.push(results.remove(&task.id).unwrap_or_else(|| TaskReport {
             id: task.id.clone(),
-            status: "skipped".into(),
+            status: TaskStatus::Skipped,
             exit_code: 0,
             duration_ms: 0,
             cleanup_errors: 0,
@@ -204,7 +251,7 @@ pub fn execute_with(
         exit_code,
         completed: tasks
             .iter()
-            .filter(|r| matches!(r.status.as_str(), "success" | "cached"))
+            .filter(|r| matches!(r.status, TaskStatus::Success | TaskStatus::Cached))
             .map(|r| r.id.clone())
             .collect(),
         failed: first_failure.map(|(id, _)| id),
@@ -221,13 +268,14 @@ fn acquire(directory: &Path, task: &PlannedTask) -> Result<Option<Vec<File>>> {
     names.dedup();
     let mut locks = Vec::new();
     for name in names {
+        let path = directory.join(cache::hash(name.as_bytes()));
         let file = File::options()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(directory.join(cache::hash(name.as_bytes())))
-            .map_err(|e| e.to_string())?;
+            .open(&path)
+            .map_err(Error::io("Cannot open lock file", &path))?;
         if file.try_lock().is_err() {
             return Ok(None);
         }
@@ -248,7 +296,7 @@ fn run_task(
     let start = Instant::now();
     let mut report = TaskReport {
         id: task.id.clone(),
-        status: "success".into(),
+        status: TaskStatus::Success,
         exit_code: 0,
         duration_ms: 0,
         cleanup_errors: 0,
@@ -284,7 +332,7 @@ fn run_task(
             )?;
             report.fingerprint = Some(fingerprint.clone());
             if !options.force && cache::hit(root, task, &fingerprint)? {
-                report.status = "cached".into();
+                report.status = TaskStatus::Cached;
                 return Ok(0);
             }
         }
@@ -346,7 +394,7 @@ fn run_task(
         }
     }
     if report.exit_code != 0 {
-        report.status = "failed".into();
+        report.status = TaskStatus::Failed;
         report.fingerprint = None;
     }
     report.duration_ms = start.elapsed().as_millis();
@@ -354,7 +402,9 @@ fn run_task(
 }
 
 pub fn preflight(plan: &Plan, root: &Path, allow_destructive: bool) -> Result<Vec<PathBuf>> {
-    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let root = root
+        .canonicalize()
+        .map_err(Error::io("Cannot resolve", root))?;
     let mut seen = BTreeSet::new();
     plan.tasks
         .iter()

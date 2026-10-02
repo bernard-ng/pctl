@@ -74,8 +74,9 @@ impl Drop for SignalGuard {
 /// Run with exactly the supplied environment and no interactive stdin.
 /// Timeout returns 124; cancellation returns 128 + signal. Both allow up to one
 /// second before SIGKILL. Remaining group members are killed even on normal exit.
-/// Pipes are drained synchronously with nonblocking reads, so there are no output
-/// workers to join. After cleanup, draining is bounded to 100 ms to tolerate an
+/// Pipes are drained synchronously with nonblocking reads gated by `poll(2)`, so
+/// there are no output workers to join and a chatty child is never throttled by a
+/// fixed sleep. After cleanup, draining is bounded to 100 ms to tolerate an
 /// escaped descendant retaining a pipe. Such a descendant is outside group control.
 pub fn run(
     command: &[String],
@@ -147,7 +148,7 @@ mod unix {
     use super::*;
     use std::collections::VecDeque;
     use std::io::{self, Read, Write};
-    use std::os::fd::AsRawFd;
+    use std::os::fd::{AsRawFd, RawFd};
     use std::os::unix::process::{CommandExt, ExitStatusExt};
     use std::process::{Child, Command, Stdio};
     use std::time::Instant;
@@ -196,6 +197,9 @@ mod unix {
         }
 
         fn push(&mut self, bytes: &[u8], output: &mut impl Write) -> io::Result<()> {
+            if self.secrets.is_empty() {
+                return output.write_all(bytes);
+            }
             for &byte in bytes {
                 self.pending.push_back((byte, false));
                 if self.pending.len() >= self.lookahead {
@@ -257,6 +261,11 @@ mod unix {
             })
         }
 
+        /// Descriptor to wait on, or `None` once the pipe has reached EOF.
+        fn pending_fd(&self) -> Option<RawFd> {
+            (!self.finished).then(|| self.pipe.as_raw_fd())
+        }
+
         fn drain(&mut self, output: &mut impl Write) -> io::Result<()> {
             if self.finished {
                 return Ok(());
@@ -290,21 +299,89 @@ mod unix {
     }
 
     /// Error paths also kill the group and reap the direct child.
-    struct SupervisedChild(Child);
+    ///
+    /// The child's pid doubles as its process-group id, so signalling `-pid` is only
+    /// safe while that pid cannot have been recycled. A child that has exited but
+    /// not been reaped remains a zombie and keeps the pid reserved, so the group is
+    /// always signalled *before* the leader is reaped (see `has_exited`).
+    struct SupervisedChild {
+        process: Child,
+        reaped: bool,
+    }
 
     impl SupervisedChild {
+        fn new(process: Child) -> Self {
+            Self {
+                process,
+                reaped: false,
+            }
+        }
+
         fn signal(&self, signal: i32) {
+            debug_assert!(!self.reaped, "the pid may already belong to someone else");
             // process_group(0) makes the child's pid its process group id.
             unsafe {
-                libc::kill(-(self.0.id() as i32), signal);
+                libc::kill(-(self.process.id() as i32), signal);
             }
+        }
+
+        /// Whether the direct child has exited, observed without reaping it.
+        fn has_exited(&self) -> io::Result<bool> {
+            // SAFETY: siginfo_t is plain data for which all-zero is valid, and the
+            // pointer is to a live local. si_pid stays zero if nothing is waitable.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let result = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    self.process.id() as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            if result != 0 {
+                let error = io::Error::last_os_error();
+                return if error.kind() == io::ErrorKind::Interrupted {
+                    Ok(false)
+                } else {
+                    Err(error)
+                };
+            }
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            let pid = unsafe { info.si_pid() };
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            let pid = info.si_pid;
+            Ok(pid != 0)
+        }
+
+        fn reap(&mut self) -> io::Result<std::process::ExitStatus> {
+            let status = self.process.wait()?;
+            self.reaped = true;
+            Ok(status)
         }
     }
 
     impl Drop for SupervisedChild {
         fn drop(&mut self) {
-            self.signal(libc::SIGKILL);
-            let _ = self.0.wait();
+            if !self.reaped {
+                self.signal(libc::SIGKILL);
+                let _ = self.process.wait();
+            }
+        }
+    }
+
+    /// Sleep until either pipe is readable (or hung up) or `timeout` elapses.
+    /// Finished pipes are passed as -1, which `poll` ignores; with both finished
+    /// this is a plain sleep. Interruption by a signal simply ends the wait early.
+    fn wait_for_output(streams: [Option<RawFd>; 2], timeout: Duration) {
+        let mut set = streams.map(|fd| libc::pollfd {
+            fd: fd.unwrap_or(-1),
+            events: libc::POLLIN,
+            revents: 0,
+        });
+        let milliseconds = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+        // `set` is a live array of two initialised pollfd structs.
+        unsafe {
+            libc::poll(set.as_mut_ptr(), 2, milliseconds);
         }
     }
 
@@ -335,15 +412,15 @@ mod unix {
             .map_err(|error| {
                 crate::error::Error::from(format!("Unable to start task process: {error}"))
             })?;
-        let mut child = SupervisedChild(child);
-        let mut stdout = Output::new(child.0.stdout.take().expect("piped stdout"), secrets)
+        let mut child = SupervisedChild::new(child);
+        let mut stdout = Output::new(child.process.stdout.take().expect("piped stdout"), secrets)
             .map_err(|error| {
-                crate::error::Error::from(format!("Unable to configure task stdout: {error}"))
-            })?;
-        let mut stderr = Output::new(child.0.stderr.take().expect("piped stderr"), secrets)
+            crate::error::Error::from(format!("Unable to configure task stdout: {error}"))
+        })?;
+        let mut stderr = Output::new(child.process.stderr.take().expect("piped stderr"), secrets)
             .map_err(|error| {
-                crate::error::Error::from(format!("Unable to configure task stderr: {error}"))
-            })?;
+            crate::error::Error::from(format!("Unable to configure task stderr: {error}"))
+        })?;
         let started = Instant::now();
         let mut stopping: Option<(Instant, i32)> = None;
         let code = loop {
@@ -364,9 +441,15 @@ mod unix {
             if stopping.is_some_and(|(when, _)| when.elapsed() >= Duration::from_secs(1)) {
                 child.signal(libc::SIGKILL);
             }
-            if let Some(status) = child.0.try_wait().map_err(|error| {
+            if child.has_exited().map_err(|error| {
                 crate::error::Error::from(format!("Unable to poll task process: {error}"))
             })? {
+                // Kill remaining group members while the zombie leader still
+                // reserves the group id, then reap it for the exit status.
+                child.signal(libc::SIGKILL);
+                let status = child.reap().map_err(|error| {
+                    crate::error::Error::from(format!("Unable to reap task process: {error}"))
+                })?;
                 break stopping.map(|(_, code)| code).unwrap_or_else(|| {
                     status.code().unwrap_or(128 + status.signal().unwrap_or(1))
                 });
@@ -377,9 +460,11 @@ mod unix {
                 .map_err(|error| {
                     crate::error::Error::from(format!("Unable to stream task output: {error}"))
                 })?;
-            std::thread::sleep(Duration::from_millis(10));
+            wait_for_output(
+                [stdout.pending_fd(), stderr.pending_fd()],
+                Duration::from_millis(10),
+            );
         };
-        child.signal(libc::SIGKILL);
         let draining = Instant::now();
         while !(stdout.finished && stderr.finished)
             && draining.elapsed() < Duration::from_millis(100)
@@ -390,9 +475,10 @@ mod unix {
                 .map_err(|error| {
                     crate::error::Error::from(format!("Unable to drain task output: {error}"))
                 })?;
-            if !(stdout.finished && stderr.finished) {
-                std::thread::sleep(Duration::from_millis(1));
-            }
+            wait_for_output(
+                [stdout.pending_fd(), stderr.pending_fd()],
+                Duration::from_millis(100).saturating_sub(draining.elapsed()),
+            );
         }
         stdout
             .finish(output)

@@ -58,7 +58,7 @@ type = "string"
 default = ".*"
 ```
 
-Quote task names containing dots. Every included file declares `schema_version = 1`; include paths are relative to the root manifest directory. Duplicate task or variable definitions, repeated includes, unknown fields, and dependency cycles are errors. There are no implicit overlays.
+Quote task names containing dots. Every included file declares `schema_version = 1`; include paths are relative to the root manifest directory. Duplicate task or variable definitions, repeated includes, unknown fields, and dependency cycles are errors. There are no implicit overlays. Loading reports every structural problem it finds in one pass, including `{param:name}` references to undeclared parameters, rather than stopping at the first.
 
 ```sh
 pctl plan api.test --param filter=Login --json
@@ -98,17 +98,25 @@ pctl --profile production config check --values
 
 The first command checks declarations without requiring credentials. `--values` additionally checks the current process environment. Diagnostics name the variable without echoing its value. Only public variables may declare browser exposure. URL validation and application-specific semantics remain outside this initial validator.
 
-Task `environment` maps are literal, non-secret overrides. Declared secrets cannot be stored there. Children inherit the caller's environment; pctl does not yet filter it by `consumers`. Consumer metadata records intended ownership only. No `.env` file is automatically loaded.
+Task `environment` maps are literal, non-secret overrides. Declared secrets cannot be stored there. Tasks do not inherit the caller's environment: a child receives only basic OS variables (`PATH`, `HOME`, `TMPDIR`, `LANG`, and similar), anything listed in the task's `pass_environment`, and the declared variables whose `consumers` overlap the task's own `consumers`.
 
-Do not pass secrets as task parameters or command literals: JSON plans contain resolved arguments and literal overrides. Child stdout/stderr pass through unchanged and are not redacted.
+For a declared variable a task consumes, the value comes from, in order of precedence: the task's own `environment` override, the process environment, then the profile's `[profiles.NAME.environment]` default. `config check --values` validates the same precedence. Profile values for variables a task does not consume are ignored, so one profile serves every task; a task override of a variable it does not consume is an error. Profile entries that are not declared variables apply to every task. `--profile` must name a profile the manifest mentions (declared, in a `required_in`, or in a task's `profiles`); `local` is the always-valid default.
+
+No `.env` file is automatically loaded; pass one explicitly with `--env-file`. It accepts `NAME=value` lines, an optional leading `export`, `#` comment lines, trailing ` # comments` after a value, and single or double quotes around a value (removed, with no escapes or expansion). The real process environment takes precedence over the file, and errors name the line, never the value.
+
+Do not pass secrets as task parameters or command literals: JSON plans contain resolved arguments and literal overrides. Values of declared `secret` variables found in the process environment are masked as `[REDACTED]` in child stdout/stderr, including when split across read chunks. Redaction matches exact values only; it cannot hide transformed copies (encoded, truncated, or reformatted).
 
 ## Execution and exit codes
 
-`plan` is read-only and does not launch tasks. `run` executes sequentially and stops at the first failure, preserving its exit code. CLI usage and configuration errors return 2. On Unix a child terminated by a signal maps to `128 + signal`.
+`plan` is read-only and does not launch tasks. `run` executes dependencies in order, one task at a time unless `--jobs N` allows independent tasks to overlap (tasks sharing an `exclusive` name never do), and stops launching new work after the first failure, preserving its exit code. CLI usage and configuration errors return 2, so a task that itself exits 2 is indistinguishable by code alone; use `--format json` for the failing task's id. On Unix a child terminated by a signal maps to `128 + signal`, and a task exceeding `timeout_seconds` returns 124.
 
-This initial process adapter uses ordinary foreground process execution. Dedicated process-group supervision, runner-directed cancellation, timeouts, and guaranteed cleanup are pending. Use existing lifecycle scripts for container workflows until those capabilities are implemented. SIGKILL and host failure cannot guarantee in-process cleanup in any implementation.
+Each task runs in its own process group with no stdin. Ctrl-C or SIGTERM is forwarded to the group (escalating to SIGKILL after one second), stops scheduling, and exits `128 + signal`. `cleanup` commands (and the `down` step of `compose` tasks) run after the task whether it succeeded, failed, timed out, or was cancelled, each limited to 30 seconds; a failing cleanup fails an otherwise successful task. Programs that deliberately start a new session or process group escape supervision, and SIGKILL or host failure of pctl itself cannot run cleanup. Process supervision requires Unix.
 
-`doctor` validates manifests and working directories. It does not yet probe tool versions or capabilities.
+`run --format` selects the report written to stdout (child output always goes to stderr): `terminal` (default), `json`, `junit`, or `ndjson`. `ndjson` streams one JSON object per line while the run is in progress: a `{"event":"task_finished","task":{...}}` line as each task finishes (cached and failed tasks included, in completion order), then one for each task that never started because of an earlier failure or cancellation (`"status":"skipped"`), and finally `{"event":"run_finished","exit_code":N}`. A consumer can therefore follow progress live and treat `run_finished` as the end marker; if it is missing, pctl itself was killed.
+
+`doctor` validates manifests and working directories and runs each declared tool's version probe (concurrently, 10 s each). It reports every failing directory and tool together.
+
+Cache `inputs` and `outputs` may be files or directories. The declared path itself must not pass through a symlink, but symlinks found inside a declared directory are fingerprinted by their target path and never followed, so trees such as `node_modules` can be cached. A task whose dependency is not itself cached always runs uncached.
 
 ## Development
 
