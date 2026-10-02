@@ -295,3 +295,42 @@ depends_on = ["broken"]
         assert_eq!(events[2]["exit_code"], 42);
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn cache_survives_a_different_path_home_or_tmpdir() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("input.txt"), "in").unwrap();
+    std::fs::write(
+        directory.path().join("pctl.toml"),
+        r#"
+schema_version = 1
+[tasks.build]
+description = "cached build"
+command = ["sh", "-c", "cp input.txt output.txt"]
+cache = { inputs = ["input.txt"], outputs = ["output.txt"] }
+"#,
+    )
+    .unwrap();
+    let path = std::env::var("PATH").unwrap();
+    let status = |environment: &[(&str, String)]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_pctl"))
+            .current_dir(directory.path())
+            .args(["run", "build", "--format", "json"])
+            .env("PATH", &path)
+            .envs(environment.iter().map(|(name, value)| (*name, value)))
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        report["tasks"][0]["status"].as_str().unwrap().to_owned()
+    };
+    assert_eq!(status(&[]), "success");
+    assert_eq!(status(&[]), "cached");
+    assert_eq!(
+        status(&[("PATH", format!("{path}:/opt/per-run-dir"))]),
+        "cached"
+    );
+    assert_eq!(status(&[("HOME", "/tmp/other-home".into())]), "cached");
+    assert_eq!(status(&[("TMPDIR", "/tmp/other-tmp".into())]), "cached");
+}

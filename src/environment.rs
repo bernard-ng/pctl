@@ -8,6 +8,21 @@ use std::{collections::BTreeMap, path::Path};
 
 pub type Environment = BTreeMap<String, String>;
 
+/// Ambient variables every task process receives so that ordinary programs work.
+/// They describe the host, not the task, so fingerprints ignore them (tool
+/// identity comes from `requires`); a task opts one back in via `pass_environment`.
+pub const OS_VARIABLES: [&str; 9] = [
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "LANG",
+    "LC_ALL",
+    "SYSTEMROOT",
+    "WINDIR",
+];
+
 pub fn load(file: Option<&Path>) -> Result<Environment> {
     let mut result = match file {
         Some(file) => parse(
@@ -108,17 +123,7 @@ pub fn resolve(
     let defaults = manifest.profiles.get(profile).map(|p| &p.environment);
     let mut environment = Environment::new();
     // OS facilities needed by subprocesses; application values are explicitly selected.
-    for key in [
-        "PATH",
-        "HOME",
-        "TMPDIR",
-        "TMP",
-        "TEMP",
-        "LANG",
-        "LC_ALL",
-        "SYSTEMROOT",
-        "WINDIR",
-    ] {
+    for key in OS_VARIABLES {
         if !manifest.variables.contains_key(key)
             && let Some(value) = source.get(key)
         {

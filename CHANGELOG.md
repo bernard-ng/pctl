@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.3
 
+- Fix: cache fingerprints no longer include the host's ambient `PATH`, `HOME`, `TMPDIR` and similar variables, which made caches miss between runners that differed only in those. Tasks can opt back in with `pass_environment`.
 - Stream child output with `poll(2)` instead of a fixed sleep (about 7x faster on 100 MB of output) and skip redaction work when no secrets are declared.
 - Hash cache inputs by streaming, canonicalize the project root once, and fingerprint symlinks inside cached directories by target instead of failing.
 - Throttle scheduler lock retries, run tool version probes concurrently, and shrink release binaries (thin LTO, stripped).

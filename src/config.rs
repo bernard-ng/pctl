@@ -249,6 +249,20 @@ fn validate_cache(manifest: &Manifest, id: &str, task: &Task, problems: &mut Vec
                 .iter()
                 .any(|consumer| task.consumers.contains(consumer))
     });
+    // Fingerprints ignore OS variables, so a declared variable with such a name
+    // would change a task's behaviour without invalidating its cache.
+    for (name, variable) in &manifest.variables {
+        if crate::environment::OS_VARIABLES.contains(&name.as_str())
+            && variable
+                .consumers
+                .iter()
+                .any(|consumer| task.consumers.contains(consumer))
+        {
+            problems.push(format!(
+                "{id}: cached tasks cannot consume {name}; the name is reserved for OS pass-through and is not fingerprinted"
+            ));
+        }
+    }
     let unclassified = task.pass_environment.iter().any(|name| {
         manifest
             .variables

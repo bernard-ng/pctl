@@ -116,7 +116,7 @@ Each task runs in its own process group with no stdin. Ctrl-C or SIGTERM is forw
 
 `doctor` validates manifests and working directories and runs each declared tool's version probe (concurrently, 10 s each). It reports every failing directory and tool together.
 
-Cache `inputs` and `outputs` may be files or directories. The declared path itself must not pass through a symlink, but symlinks found inside a declared directory are fingerprinted by their target path and never followed, so trees such as `node_modules` can be cached. A task whose dependency is not itself cached always runs uncached.
+Cache `inputs` and `outputs` may be files or directories. The declared path itself must not pass through a symlink, but symlinks found inside a declared directory are fingerprinted by their target path and never followed, so trees such as `node_modules` can be cached. A task whose dependency is not itself cached always runs uncached. Fingerprints cover the task definition, its declared inputs, the dependencies' fingerprints, tool versions from `requires`, and the environment the task selected; they deliberately ignore the host's ambient variables (`PATH`, `HOME`, `TMPDIR`, `TMP`, `TEMP`, `LANG`, `LC_ALL`, `SYSTEMROOT`, `WINDIR`) so runners that differ only in those still share a cache. Declare the tools a task depends on in `requires`, or list a variable such as `PATH` in the task's `pass_environment` to make it count. A cached task cannot consume a declared variable with one of those names.
 
 ## Development
 

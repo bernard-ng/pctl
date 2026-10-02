@@ -1,5 +1,5 @@
 //! Content fingerprints and verified output receipts. Never cache failures.
-use crate::{Result, error::Error, model::PlannedTask, paths};
+use crate::{Result, environment::OS_VARIABLES, error::Error, model::PlannedTask, paths};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -87,6 +87,16 @@ pub fn fingerprint(
     tools: &BTreeMap<String, String>,
     dependencies: &[String],
 ) -> Result<String> {
+    // Host-specific OS variables would make every runner with a different PATH or
+    // HOME miss the cache, so only task-selected values contribute.
+    let environment: BTreeMap<&String, &String> = environment
+        .iter()
+        .filter(|(name, _)| {
+            !OS_VARIABLES.contains(&name.as_str())
+                || task.environment.contains_key(*name)
+                || task.pass_environment.contains(name)
+        })
+        .collect();
     let mut hasher = Sha256::new();
     hasher.update(serde_json::to_vec(&(
         env!("CARGO_PKG_VERSION"),

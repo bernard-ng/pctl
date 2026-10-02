@@ -369,6 +369,68 @@ fn cache_verifies_inputs_and_outputs_and_force_bypasses_hit() {
 }
 
 #[test]
+fn cache_ignores_host_variables_unless_the_task_opts_in() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("input.txt"), "data").unwrap();
+    let cached = |pass: &[&str]| {
+        let mut build = task("build");
+        build.pass_environment = pass.iter().map(|name| (*name).into()).collect();
+        build.cache = Some(Cache {
+            inputs: vec!["input.txt".into()],
+            outputs: vec!["output.txt".into()],
+        });
+        plan(vec![build])
+    };
+    let executor = FakeExecutor {
+        write_output: true,
+        ..Default::default()
+    };
+    let mut options = RunOptions::default();
+    let mut status = |plan: &Plan, environment: &[(&str, &str)]| {
+        options.environments.insert(
+            "build".into(),
+            environment
+                .iter()
+                .map(|(name, value)| ((*name).into(), (*value).into()))
+                .collect(),
+        );
+        execute_with(plan, root.path(), &options, &executor)
+            .unwrap()
+            .tasks[0]
+            .status
+    };
+
+    let plain = cached(&["EXPLICIT"]);
+    let host = |path, home, tmp| {
+        [
+            ("PATH", path),
+            ("HOME", home),
+            ("TMPDIR", tmp),
+            ("EXPLICIT", "1"),
+        ]
+    };
+    assert_eq!(
+        status(&plain, &host("/a", "/h1", "/t1")),
+        TaskStatus::Success
+    );
+    // Different PATH, HOME and TMPDIR on another runner: still a hit.
+    assert_eq!(
+        status(&plain, &host("/b", "/h2", "/t2")),
+        TaskStatus::Cached
+    );
+    // A value the task selected does count.
+    let changed = [("PATH", "/b"), ("EXPLICIT", "2")];
+    assert_eq!(status(&plain, &changed), TaskStatus::Success);
+
+    // Listing PATH in `pass_environment` opts it back in.
+    let strict = cached(&["EXPLICIT", "PATH"]);
+    assert_eq!(status(&strict, &changed), TaskStatus::Success);
+    assert_eq!(status(&strict, &changed), TaskStatus::Cached);
+    let other_path = [("PATH", "/c"), ("EXPLICIT", "2")];
+    assert_eq!(status(&strict, &other_path), TaskStatus::Success);
+}
+
+#[test]
 fn cache_hashes_nested_symlinks_by_target_but_rejects_symlinked_declarations() {
     use std::os::unix::fs::symlink;
 

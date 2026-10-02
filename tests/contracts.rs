@@ -232,3 +232,33 @@ fn single_problem_is_reported_plainly_and_cycles_with_unknown_dependencies_do_no
     assert!(error.contains("a: unknown dependency ghost"), "{error}");
     assert!(error.contains("Task dependency cycle at a"), "{error}");
 }
+
+#[test]
+fn cached_tasks_cannot_consume_declared_variables_named_like_os_variables() {
+    let manifest = |consumer: &str| {
+        format!(
+            r#"
+schema_version = 1
+[variables.HOME]
+type = "string"
+visibility = "internal"
+consumers = ["tools"]
+[tasks.build]
+description = "cached"
+command = ["true"]
+consumers = ["{consumer}"]
+cache = {{ inputs = ["in"], outputs = ["out"] }}
+"#
+        )
+    };
+    let error = load_error(&manifest("tools"));
+    assert!(
+        error.contains("build: cached tasks cannot consume HOME"),
+        "{error}"
+    );
+    // Not a consumer, so the variable never reaches the task.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("pctl.toml");
+    std::fs::write(&path, manifest("other")).unwrap();
+    assert!(Project::load(&path).is_ok());
+}
